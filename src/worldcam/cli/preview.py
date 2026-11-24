@@ -10,7 +10,8 @@ Every --stats-every seconds a `stats` line is printed (and appended to
 --stats-csv): interval fps, grabber read fps, frames read/consumed/dropped,
 read failures, max frame gap (interval and overall), max frame age, current
 and peak RSS, and source reconnects. A `summary` line is printed at the end,
-also on Ctrl-C.
+also on Ctrl-C. Its rss_growth_mb compares the mean RSS of the first minute
+(after warm-up) with the last minute; see SoakStats for why.
 
 Quit with q or ESC (or Ctrl-C).
 """
@@ -59,50 +60,25 @@ def main(argv: list[str] | None = None) -> None:
             csv_fh.flush()  # a killed soak run still leaves a usable CSV
 
     t_start = time.monotonic()
-    stats = SoakStats(now=t_start)
-    next_stats = t_start + args.stats_every
+    # A trailing interval shorter than half a period is still printed but not
+    # counted in fps min/mean/max.
+    stats = SoakStats(now=t_start, min_interval=max(0.5, args.stats_every / 2))
     g = LatestFrameGrabber(src)
+    end = t_start
     try:
         with g:
             print("negotiated:", src.describe(), flush=True)
-            last = 0
-            while True:
-                now = time.monotonic()
-                if args.stats_every > 0 and now >= next_stats:
-                    emit(stats.snapshot(g, src, now))
-                    next_stats += args.stats_every
-                    if next_stats <= now:  # fell behind (e.g. long stall): realign
-                        next_stats = now + args.stats_every
-                if args.seconds and now - t_start > args.seconds:
-                    break
-                timeout = 1.0
-                if args.stats_every > 0:
-                    timeout = min(timeout, max(0.01, next_stats - now))
-                f = g.get(after_seq=last, timeout=timeout)
-                if f is None:
-                    if g.eof:
-                        break
-                    continue
-                last = f.seq
-                meter.tick()
-                stats.on_frame(f.ts)
-                w, h = f.shape
-                scale = args.preview_width / w
-                small = cv2.resize(f.image, (args.preview_width, int(h * scale)), interpolation=cv2.INTER_AREA)
-                age_ms = (time.monotonic() - f.ts) * 1000
-                label = f"{w}x{h} | {meter.fps:.1f} fps | age {age_ms:.0f} ms | dropped {g.dropped}"
-                cv2.putText(small, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
-                if args.no_display:
-                    continue
-                cv2.imshow("worldcam", small)
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
-                    break
+            try:
+                _loop(args, g, src, stats, meter, emit, t_start)
+            finally:
+                # Final partial interval, taken while the grabber is still
+                # running so its shutdown time is not reported as a frame gap.
+                end = time.monotonic()
+                if args.stats_every > 0 and end - stats.interval_start >= 0.5:
+                    emit(stats.snapshot(g, src, end))
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr, flush=True)
     finally:
-        end = time.monotonic()
-        if args.stats_every > 0 and end - stats.interval_start >= 0.5:
-            emit(stats.snapshot(g, src, end))  # final partial interval
         if not args.no_display:
             cv2.destroyAllWindows()
         if csv_fh is not None:
@@ -111,6 +87,43 @@ def main(argv: list[str] | None = None) -> None:
     print(f"done: {meter.fps:.1f} fps (rolling), read={g.frames_read} consumed={g.frames_consumed} "
           f"dropped={g.dropped} read_failures={g.read_failures}", flush=True)
     print("summary", format_row(s), flush=True)
+
+
+def _loop(args, g: LatestFrameGrabber, src, stats: SoakStats, meter: RateMeter, emit, t_start: float) -> None:
+    """Consume newest frames until --seconds, EOF, or q/ESC."""
+    next_stats = t_start + args.stats_every
+    last = 0
+    while True:
+        now = time.monotonic()
+        if args.stats_every > 0 and now >= next_stats:
+            emit(stats.snapshot(g, src, now))
+            next_stats += args.stats_every
+            if next_stats <= now:  # fell behind (e.g. long stall): realign
+                next_stats = now + args.stats_every
+        if args.seconds and now - t_start > args.seconds:
+            return
+        timeout = 1.0
+        if args.stats_every > 0:
+            timeout = min(timeout, max(0.01, next_stats - now))
+        f = g.get(after_seq=last, timeout=timeout)
+        if f is None:
+            if g.eof:
+                return
+            continue
+        last = f.seq
+        meter.tick()
+        stats.on_frame(f.ts)
+        w, h = f.shape
+        scale = args.preview_width / w
+        small = cv2.resize(f.image, (args.preview_width, int(h * scale)), interpolation=cv2.INTER_AREA)
+        age_ms = (time.monotonic() - f.ts) * 1000
+        label = f"{w}x{h} | {meter.fps:.1f} fps | age {age_ms:.0f} ms | dropped {g.dropped}"
+        cv2.putText(small, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
+        if args.no_display:
+            continue
+        cv2.imshow("worldcam", small)
+        if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+            return
 
 
 if __name__ == "__main__":

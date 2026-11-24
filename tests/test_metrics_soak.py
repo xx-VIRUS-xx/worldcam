@@ -65,3 +65,32 @@ def test_preview_headless_prints_stats_and_writes_csv(tmp_path, capsys):
     assert float(rows[0]["fps"]) > 20  # synthetic runs at 30 fps
     # headless consumer keeps up (allow scheduler jitter on a busy machine)
     assert int(rows[-1]["dropped"]) <= 0.2 * int(rows[-1]["frames_read"])
+
+
+def test_rss_growth_is_windowed_and_skips_first_interval(monkeypatch):
+    # init (pre-open) 40, camera-open spike 160, then steady ~90 with noise, end ~92.
+    samples = iter([40.0, 160.0, 88, 92, 90, 89, 91, 90, 95, 85, 93, 91, 92, 90])
+    monkeypatch.setattr(metrics, "current_rss_mb", lambda: next(samples))
+    s = SoakStats(now=0.0, rss_window=3)
+    g = _G()
+    for i in range(1, 14):
+        s.snapshot(g, _Src(), now=float(i))
+    summ = s.summary(now=13.0)
+    assert summ["rss_init_mb"] == 40.0          # not used for growth
+    assert summ["rss_start_mb"] == 90.0         # mean(88, 92, 90): spike skipped
+    assert summ["rss_end_mb"] == 91.0           # mean(93, 91, ... last 3) = (91+92+90)/3
+    assert summ["rss_growth_mb"] == 1.0
+    assert summ["rss_max_mb"] == 160.0
+
+
+def test_short_trailing_interval_not_counted_in_fps(monkeypatch):
+    monkeypatch.setattr(metrics, "current_rss_mb", lambda: 50.0)
+    s = SoakStats(now=0.0, min_interval=5.0)
+    g = _G()
+    for i in range(300):
+        s.on_frame(i / 30, now=i / 30)
+    s.snapshot(g, _Src(), now=10.0)       # full interval, 30 fps
+    s.snapshot(g, _Src(), now=10.5)       # 0.5 s trailing, 0 frames
+    summ = s.summary(now=10.5)
+    assert summ["intervals"] == 1
+    assert summ["fps_min"] == 30.0

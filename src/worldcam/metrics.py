@@ -105,10 +105,26 @@ class SoakStats:
                  snapshot time as (now - last frame ts), so a dead source shows
                  up in the interval where it happens, not only after recovery.
     age        = consumer receive time - Frame.ts.
+
+    Memory growth is windowed, not two single samples: RSS on macOS swings by
+    tens of MB between samples (page compression), and the very first sample is
+    taken before the camera is even open. So:
+      rss_init   = RSS when SoakStats is created (before the source opens).
+      rss_start  = mean RSS of the first `rss_window` intervals after skipping
+                   the first one (camera open / warm-up allocations).
+      rss_end    = mean RSS of the last `rss_window` intervals.
+      rss_growth = rss_end - rss_start.  This is the leak signal.
+    Intervals shorter than `min_interval` s (e.g. a trailing partial one) are
+    reported as rows but excluded from fps min/mean/max.
     """
 
-    def __init__(self, now: float | None = None):
+    def __init__(self, now: float | None = None, min_interval: float = 0.5, rss_window: int = 6):
         now = time.monotonic() if now is None else now
+        self.min_interval = min_interval
+        self.rss_window = max(1, rss_window)
+        self._rss_seen = 0
+        self._rss_first: list[float] = []  # bounded: at most rss_window items
+        self._rss_last: deque[float] = deque(maxlen=self.rss_window)
         self.t0 = now
         self.interval_start = now
         self._last_ts: float | None = None
@@ -122,9 +138,8 @@ class SoakStats:
         self.fps_max = 0.0
         self._fps_sum = 0.0
         self._fps_n = 0
-        self.rss_start = current_rss_mb()
-        self.rss_end = self.rss_start
-        self.rss_max = self.rss_start
+        self.rss_init = current_rss_mb()
+        self.rss_max = self.rss_init
         self.reconnects = 0
 
     def on_frame(self, frame_ts: float, now: float | None = None) -> None:
@@ -149,14 +164,17 @@ class SoakStats:
             self.gap_max_all = max(self.gap_max_all, open_gap)
         fps = self._int_frames / dt
         read_fps = (grabber.frames_read - self._last_read) / dt
-        if dt >= 0.5:  # a tiny trailing interval would skew fps min/mean/max
+        if dt >= self.min_interval:  # a short trailing interval would skew fps min/mean/max
             self.fps_min = min(self.fps_min, fps)
             self.fps_max = max(self.fps_max, fps)
             self._fps_sum += fps
             self._fps_n += 1
         rss = current_rss_mb()
         if rss is not None:
-            self.rss_end = rss
+            self._rss_seen += 1
+            if self._rss_seen > 1 and len(self._rss_first) < self.rss_window:
+                self._rss_first.append(rss)  # skip interval 1 (camera open)
+            self._rss_last.append(rss)
             self.rss_max = rss if self.rss_max is None else max(self.rss_max, rss)
         self.reconnects = int(getattr(source, "reconnects", 0) or 0)
         row = {
@@ -183,14 +201,16 @@ class SoakStats:
 
     def summary(self, now: float | None = None) -> dict:
         now = time.monotonic() if now is None else now
-        growth = None
-        if self.rss_start is not None and self.rss_end is not None:
-            growth = self.rss_end - self.rss_start
+        first = self._rss_first or list(self._rss_last)  # very short runs
+        start = sum(first) / len(first) if first else None
+        end = sum(self._rss_last) / len(self._rss_last) if self._rss_last else None
+        growth = None if start is None or end is None else end - start
         n = self._fps_n
         return {
             "elapsed_s": round(now - self.t0, 1),
-            "rss_start_mb": _round(self.rss_start),
-            "rss_end_mb": _round(self.rss_end),
+            "rss_init_mb": _round(self.rss_init),
+            "rss_start_mb": _round(start),
+            "rss_end_mb": _round(end),
             "rss_max_mb": _round(self.rss_max),
             "peak_rss_mb": _round(peak_rss_mb()),
             "rss_growth_mb": _round(growth),
