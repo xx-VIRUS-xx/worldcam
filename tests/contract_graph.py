@@ -183,7 +183,6 @@ def test_merge_people_unknown_raises(store):
 
 
 def test_merge_person_into_itself_is_rejected(store, request):
-    _xfail_mem(store, request, INMEM_BUG + ": merge_people(a, a) deletes a")
     a = store.upsert_person(name="A")
     with pytest.raises(ValueError):
         store.merge_people(a, a)
@@ -198,7 +197,6 @@ def test_merge_dedups_relations_and_drops_self_loops(store, request):
     store.relate(drop, "friend", other, source="owner")
     store.relate(keep, "partner", drop, source="owner")
     store.merge_people(keep, drop)
-    _xfail_mem(store, request, INMEM_BUG + ": merge leaves duplicate relations and keep->keep self-loops")
     assert sorted(store.relations(keep)) == [("friend", other, "out")]
 
 
@@ -207,7 +205,6 @@ def test_merge_redirects_doubts(store, request):
     drop = store.upsert_person(name="D")
     did = store.create_doubt(Doubt("", "conflict", about_ids=(keep, drop)))
     store.merge_people(keep, drop)
-    _xfail_mem(store, request, INMEM_BUG + ": merge leaves Doubt.about_ids pointing at the deleted person")
     assert store.get_doubt(did).about_ids == (keep,)
 
 
@@ -228,11 +225,13 @@ def test_forget_person_hard_deletes_and_returns_paths(store, rng):
     store.add_fact(pid, "name_hint", "V", source="observed", confidence=0.5)
     store.add_fact(keep, "role", "owner", source="owner", confidence=1.0)
     store.relate(pid, "friend", keep, source="owner")
-    did = store.create_doubt(Doubt("", "unknown_face", about_ids=(cid,)))
+    did = store.create_doubt(Doubt("", "unknown_face", about_ids=(cid,), snapshot_paths=("snap/d1.jpg",)))
+    did_p = store.create_doubt(Doubt("", "metadata_gap", about_ids=(pid,)))
+    did_keep = store.create_doubt(Doubt("", "metadata_gap", about_ids=(keep,)))
 
     paths = store.forget_person(pid)
 
-    assert paths == ["snap/f1.jpg", "snap/f2.jpg", "snap/s1.jpg"]
+    assert paths == ["snap/d1.jpg", "snap/f1.jpg", "snap/f2.jpg", "snap/s1.jpg"]
     assert store.get_person(pid) is None
     assert store.facts(pid) == []
     assert store.relations(keep) == []
@@ -241,7 +240,8 @@ def test_forget_person_hard_deletes_and_returns_paths(store, rng):
         store.cluster_size(cid)
     assert [m.cluster_id for m in store.match_face(v, k=5)] == [other_cid]
     assert [f.key for f in store.facts(keep)] == ["role"]
-    assert store.get_doubt(did) is not None  # doubts are not in the forget list
+    assert store.get_doubt(did) is None and store.get_doubt(did_p) is None  # doubts about them go too
+    assert store.get_doubt(did_keep) is not None
     with pytest.raises(KeyError):
         store.forget_person(pid)
 

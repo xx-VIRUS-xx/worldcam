@@ -278,7 +278,8 @@ class Neo4jGraphStore:
     def forget_person(self, person_id):
         """Hard delete person, facts, relations, sightings, faces and clusters.
         Returns snapshot paths that the caller must delete from disk.
-        Doubts are not deleted (protocol), but their ABOUT edges go."""
+        Doubts about the person or their clusters are deleted too, and their
+        snapshot paths returned."""
         def tx_fn(tx):
             self._need_person_tx(tx, person_id)
             cids = self._one(tx, "MATCH (c:FaceCluster {person_id: $id}) RETURN collect(c.id) AS c",
@@ -291,6 +292,10 @@ class Neo4jGraphStore:
                 MATCH (s:Sighting) WHERE s.person_id = $id OR s.cluster_id IN $cids
                 WITH s, s.snapshot_path AS sp DETACH DELETE s RETURN collect(sp) AS p""",
                                id=person_id, cids=cids)["p"]
+            paths += self._one(tx, """
+                MATCH (x:Doubt) WHERE any(i IN x.about_ids WHERE i = $id OR i IN $cids)
+                WITH x, coalesce(x.snapshot_paths, []) AS sp DETACH DELETE x
+                RETURN reduce(acc = [], l IN collect(sp) | acc + l) AS p""", id=person_id, cids=cids)["p"]
             tx.run(self._q("MATCH (c:FaceCluster) WHERE c.id IN $cids DETACH DELETE c"), cids=cids).consume()
             tx.run(self._q("MATCH (f:Fact {person_id: $id}) DETACH DELETE f"), id=person_id).consume()
             tx.run(self._q("MATCH (p:Person {id: $id}) DETACH DELETE p"), id=person_id).consume()

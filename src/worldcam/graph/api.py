@@ -88,11 +88,13 @@ class GraphStore(Protocol):
                       kind: Optional[str] = None, aliases: Sequence[str] = (), ts: Optional[float] = None) -> str: ...
     def get_person(self, person_id: str) -> Optional[Person]: ...
     def search_people(self, text: str, limit: int = 10) -> list[Person]: ...
+    def list_people(self, limit: int = 1000) -> list[Person]: ...
     def set_persona_summary(self, person_id: str, summary: str) -> None: ...
     def merge_people(self, keep_id: str, drop_id: str) -> None: ...
     def forget_person(self, person_id: str) -> list[str]:
-        """Hard delete person, facts, relations, sightings, faces and clusters.
-        Returns snapshot paths that the caller must delete from disk."""
+        """Hard delete person, facts, relations, sightings, faces, clusters, and
+        every doubt about the person or their clusters (doubts hold their crops
+        and questions). Returns snapshot paths the caller must delete from disk."""
 
     # faces
     def add_face(self, embedding: Sequence[float], *, quality: float, ts: float,
@@ -173,11 +175,16 @@ class InMemoryGraphStore:
                 if (p.name and t in p.name.lower()) or any(t in a.lower() for a in p.aliases)]
         return hits[:limit]
 
+    def list_people(self, limit=1000):
+        return sorted(self.people.values(), key=lambda p: p.first_seen)[:limit]
+
     def set_persona_summary(self, person_id, summary):
         p = self._need_person(person_id)
         self.people[person_id] = replace(p, persona_summary=summary, persona_updated=time.time())
 
     def merge_people(self, keep_id, drop_id):
+        if keep_id == drop_id:
+            raise ValueError("cannot merge a person into itself")
         keep, drop = self._need_person(keep_id), self._need_person(drop_id)
         for cid, c in self.clusters.items():
             if c["person_id"] == drop_id:
@@ -188,8 +195,19 @@ class InMemoryGraphStore:
         for fid, f in list(self._facts.items()):
             if f.person_id == drop_id:
                 self._facts[fid] = replace(f, person_id=keep_id)
-        self._rels = [(keep_id if a == drop_id else a, r, keep_id if b == drop_id else b, src)
-                      for a, r, b, src in self._rels]
+        rels, seen = [], set()
+        for a, r, b, src in self._rels:
+            a = keep_id if a == drop_id else a
+            b = keep_id if b == drop_id else b
+            if a == b or (a, r, b) in seen:
+                continue  # drop self-loops and duplicates created by the merge
+            seen.add((a, r, b))
+            rels.append((a, r, b, src))
+        self._rels = rels
+        for did, d in list(self.doubts.items()):
+            if drop_id in d.about_ids:
+                ids = tuple(dict.fromkeys(keep_id if i == drop_id else i for i in d.about_ids))
+                self.doubts[did] = replace(d, about_ids=ids)
         aliases = keep.aliases + drop.aliases + ((drop.name,) if drop.name else ())
         self.people[keep_id] = replace(keep, aliases=tuple(dict.fromkeys(a for a in aliases if a != keep.name)),
                                        first_seen=min(keep.first_seen, drop.first_seen),
@@ -214,6 +232,11 @@ class InMemoryGraphStore:
                 del self.sightings[sid]
         self._facts = {k: f for k, f in self._facts.items() if f.person_id != person_id}
         self._rels = [r for r in self._rels if person_id not in (r[0], r[2])]
+        gone = {person_id, *cids}
+        for did, d in list(self.doubts.items()):
+            if gone & set(d.about_ids):
+                paths.extend(d.snapshot_paths)
+                del self.doubts[did]
         del self.people[person_id]
         return sorted(set(paths))
 
@@ -312,6 +335,8 @@ class InMemoryGraphStore:
         return self.doubts.get(doubt_id)
 
     def update_doubt(self, doubt_id, **fields):
+        if {"id", "updated"} & set(fields):
+            raise TypeError("update_doubt: cannot set id/updated")
         if "status" in fields and fields["status"] not in DOUBT_STATUSES:
             raise ValueError("bad status")
         d = replace(self.doubts[doubt_id], **fields, updated=time.time())
