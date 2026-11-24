@@ -153,8 +153,12 @@ class Detector(Protocol):
 
 
 class Tracker(Protocol):
-    def update(self, frame: Frame, dets: Sequence[Detection]) -> TrackUpdate:
-        """Owns lifecycle (NEW/ACTIVE/STATIONARY/LOST/ENDED) and best-snapshot selection."""
+    def update(self, frame: Frame, dets: Sequence[Detection],
+               observed_regions: Optional[Sequence[Box]] = None) -> TrackUpdate:
+        """Owns lifecycle (NEW/ACTIVE/STATIONARY/LOST/ENDED) and best-snapshot selection.
+        observed_regions: where the detector actually looked (None = whole frame).
+        Needed with a motion gate, so a track outside the looked-at regions is not
+        counted as a missed detection."""
 
 
 class ZoneResolver(Protocol):
