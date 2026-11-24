@@ -10,3 +10,7 @@ captures/
 .env
 *.env
 captures/snapshots/
+
+# model weights (downloaded, never committed)
+models/
+*.pt
