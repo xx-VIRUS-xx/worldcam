@@ -26,6 +26,9 @@ worldcam-preview = "worldcam.cli.preview:main"
 worldcam-dualcheck = "worldcam.cli.dualcheck:main"
 worldcam-rtsp-soak = "worldcam.cli.rtsp_soak:main"
 worldcam-detect = "worldcam.cli.detect:main"
+worldcam-run = "worldcam.cli.run:main"
+worldcam-graph = "worldcam.cli.graph_admin:main"
+worldcam-telegram-setup = "worldcam.cli.telegram_setup:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

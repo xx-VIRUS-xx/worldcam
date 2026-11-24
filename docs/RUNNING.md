@@ -3,9 +3,10 @@
 This is a hands-on guide: set up, run each tool, and find where things live.
 Every command runs from the repo root (`~/PY/worldcam`) on this Mac.
 
-Current state: only the **capture layer** works (camera/stream in, newest
-frame out). Detector, tracker, identity, VLM and memory are just interfaces in
-`pipeline.py` for now; see `docs/ROADMAP.md` for the weekly plan.
+Current state: capture, detection + tracking, face identity, the Neo4j graph,
+and the ambiguity engine (a `claude -p` worker that asks you on Telegram who
+unknown people are) all exist. The VLM/activity stage is still only an interface.
+Design: `docs/AMBIGUITY_ENGINE.md`.
 
 ---
 
@@ -32,7 +33,7 @@ with `.venv/bin/`.
 ## 2. Check that everything works (no camera needed)
 
 ```bash
-pytest -q                                                    # expect 65 passed
+pytest -q                                                    # all pass; Neo4j tests skip if it is down
 worldcam-preview --source synthetic --no-display --seconds 5 # generated frames, no hardware
 ```
 
@@ -132,6 +133,42 @@ The script starts and stops its own mediamtx and ffmpeg. Each `[event]` line
 should show `thread_alive=True`, `frames_while_down=0`, and `max_read` under
 about 4.1 s.
 
+### Full pipeline: `worldcam-run`
+
+One-time setup:
+
+```bash
+pip install -e '.[dev,all]'                   # YOLO, InsightFace, neo4j, mcp
+docker compose up -d                          # Neo4j (password in .env, browse http://127.0.0.1:7474)
+worldcam-graph init                           # schema + vector indexes
+worldcam-telegram-setup                       # after putting TELEGRAM_BOT_TOKEN in .env
+```
+
+Run:
+
+```bash
+worldcam-run --source 0                       # everything, questions go to Telegram
+worldcam-run --source 0 --notifier log        # questions only logged (no Telegram)
+worldcam-run --source 0 --no-engine           # detect + identify + store, never ask
+```
+
+What happens: a person is tracked, and their best snapshot's face is embedded
+and matched against the graph. A stranger seen 3 times, a weak match or a
+conflict opens a doubt. The engine runs `claude -p` (no shell or file tools,
+only graph and ask-owner tools), which sends you a question with the crop. Your
+reply triggers a second run that writes the name, relation and facts into the
+graph. Limits: 6 questions per hour, quiet hours 23:00–08:00, 3 rounds per doubt.
+
+Inspect and manage the graph:
+
+```bash
+worldcam-graph status | people | show <name|id> | doubts --status asked
+worldcam-graph forget <person_id>             # hard-deletes person, faces, sightings, doubts + snapshot files
+```
+
+Other tools: `worldcam-detect --source 0` (live detection overlay),
+`python -m worldcam.identity.bench` (face model latency/similarity).
+
 ## 4. Where is what
 
 ```
@@ -145,7 +182,9 @@ worldcam/
 │   ├── baseline.md        FaceTime camera numbers at 480p/720p/1080p + diagnosis
 │   ├── phone.md           iPhone / IP-camera app / DroidCam / Camo setup + numbers
 │   ├── rtsp.md            RTSP timeouts, reconnect behaviour, outage measurements
-│   └── dual.md            main/sub offset measurements and the ring fix
+│   ├── dual.md            main/sub offset measurements and the ring fix
+│   ├── AMBIGUITY_ENGINE.md design + decisions for perception → doubts → Telegram
+│   ├── perception.md / identity.md / graph.md / ambiguity.md / telegram.md   per-component notes + numbers
 ├── src/worldcam/
 │   ├── types.py           Frame(seq, ts, image): the one data type everything passes around
 │   ├── capture.py         LatestFrameGrabber: background thread, keeps only the newest frame
@@ -156,10 +195,15 @@ worldcam/
 │   │   ├── rtsp.py        StreamSource: RTSP/HTTP with timeouts, stall detection, reconnects
 │   │   ├── file.py        FileSource (video file) and SyntheticSource (generated frames)
 │   │   └── dual.py        DualGrabber: low-res sub paces detection, full-res main for crops
+│   ├── perception/        motion gate, YOLO detector, IoU tracker, PerceptionLoop
+│   ├── identity/          FaceAnalyzer (InsightFace) + IdentityResolver (match/ask/conflict)
+│   ├── graph/             api.py (GraphStore contract + in-memory fake), store.py (Neo4j)
+│   ├── ambiguity/         doubt triggers, engine, claude -p worker, MCP server, prompts/
+│   ├── messenger/         Notifier contract + Telegram bot
 │   ├── geometry.py        normalized (0..1) boxes/polygons, IoU, crop_norm
 │   ├── metrics.py         RateMeter, percentile, RSS helpers, SoakStats
 │   ├── pipeline.py        interfaces for the later stages (detector → … → memory); no code yet
-│   └── cli/               bench.py, preview.py, dualcheck.py, rtsp_soak.py
+│   └── cli/               run.py (whole pipeline), bench, preview, detect, graph_admin, telegram_setup, ...
 ├── tests/                 pytest suite; runs with no camera or network
 └── captures/              (git-ignored) soak logs, CSVs, test clips
 ```
