@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "worldcam"
+version = "0.1.0"
+description = "Camera -> detector -> tracker -> identity -> VLM -> world state -> memory. Capture layer first."
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.9",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+worldcam-bench = "worldcam.cli.bench:main"
+worldcam-preview = "worldcam.cli.preview:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
