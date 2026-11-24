@@ -7,3 +7,6 @@ __pycache__/
 captures/
 .claude/
 .DS_Store
+.env
+*.env
+captures/snapshots/

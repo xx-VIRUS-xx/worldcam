@@ -93,6 +93,19 @@ class Identity:
 
 
 @dataclass(frozen=True)
+class FaceObservation:
+    """One face found in a track's best snapshot (identity/faces.py output).
+    Added for the ambiguity engine: Identity alone can't carry the embedding
+    the graph needs for clustering and matching."""
+    track_id: int
+    ts: float
+    box: Box                        # normalized, relative to the full frame
+    embedding: tuple[float, ...]    # L2-normalized, 512-d (ArcFace)
+    quality: float                  # 0..1: detector score x size x sharpness x frontalness
+    crop_path: Optional[str] = None # saved face crop (local), sent to the owner when asked
+
+
+@dataclass(frozen=True)
 class ActivityHypothesis:
     """VLM output. A hypothesis, never a fact."""
     activity: str                   # "coding", "eating", "unknown", ...
