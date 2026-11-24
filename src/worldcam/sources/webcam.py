@@ -60,8 +60,13 @@ def _backend_to_str(backend: int) -> str:
 
 
 def _fourcc_to_str(v: float) -> str:
+    # AVFoundation does not report CAP_PROP_FOURCC (returns -1 -> "ÿÿÿÿ");
+    # print "n/a" instead of garbage.
     n = int(v)
-    return "".join(chr((n >> (8 * i)) & 0xFF) for i in range(4))
+    s = "".join(chr((n >> (8 * i)) & 0xFF) for i in range(4))
+    if n <= 0 or not all(32 <= ord(ch) < 127 for ch in s):
+        return "n/a"
+    return s
 
 
 class WebcamSource(FrameSource):
