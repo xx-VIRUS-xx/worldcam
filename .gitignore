@@ -6,3 +6,4 @@ __pycache__/
 *.avi
 captures/
 .claude/
+.DS_Store

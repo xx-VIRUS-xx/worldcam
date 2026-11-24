@@ -3,33 +3,18 @@
 Camera -> detector -> tracker -> identity -> VLM -> world state -> memory.
 This repo currently contains only the **capture layer** and stage contracts.
 
-## Layout
-```
-src/worldcam/
-  types.py        Frame(seq, ts, image)
-  capture.py      LatestFrameGrabber: capture thread, newest-frame-only
-  sources/        FrameSource implementations: webcam, rtsp/http stream, file, synthetic
-  sources/dual.py DualGrabber: substream paces detection, mainstream gives full-res crops
-  geometry.py     normalized boxes/polygons, point-in-polygon, IoU, resolution-independent crop
-  pipeline.py     Typed contracts for later stages (track lifecycle, zones, world state, memory); no implementations yet
-docs/ROADMAP.md  adopted NVR patterns, conventions, week-by-week plan, risks
-  cli/bench.py    two-phase benchmark (raw read vs threaded grabber)
-  cli/preview.py  live preview with fps / frame-age overlay
-tests/            run without any camera
-AGENT_PROMPT.md   prompt for a coding agent to finish week 1 on real hardware
-```
+**How to run it and where everything lives: [docs/RUNNING.md](docs/RUNNING.md).**
 
-## Run
+## Quick start
 ```bash
-pip install -e ".[dev]"
-pytest
-
-worldcam-bench   --source 0 --width 1280 --height 720 --fps 30
-worldcam-preview --source 0
-worldcam-preview --source http://<phone-ip>:8080/video      # IP-camera app
-worldcam-preview --source rtsp://user:pass@<cctv-ip>/stream1 # CCTV later
-worldcam-preview --source synthetic --no-display --seconds 3 # no hardware
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest -q
+.venv/bin/worldcam-preview --source 0                    # built-in camera, q to quit
+.venv/bin/worldcam-bench   --source 0 --seconds 30 --work-ms 80
 ```
+
+Docs: [RUNNING](docs/RUNNING.md) · [ROADMAP](docs/ROADMAP.md) ·
+[baseline](docs/baseline.md) · [phone](docs/phone.md) · [rtsp](docs/rtsp.md) · [dual](docs/dual.md)
 
 ## Reading the benchmark
 - **phase 1 slow** -> driver/backend/pixel format/low light. Try another backend, keep MJPG, brighten the room.
