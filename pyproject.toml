@@ -17,7 +17,7 @@ dev = ["pytest>=8"]
 perception = ["ultralytics>=8.3"]          # YOLO detector + tracker (AGPL-3.0)
 identity = ["insightface>=0.7.3", "onnxruntime>=1.18"]  # face detect + ArcFace embeddings
 graph = ["neo4j>=5.20"]
-engine = ["mcp>=1.2"]                       # MCP server exposed to the claude -p worker
+engine = ["mcp>=2"]                       # MCP server exposed to the claude -p worker
 all = ["worldcam[perception,identity,graph,engine]"]
 
 [project.scripts]
@@ -28,6 +28,9 @@ worldcam-rtsp-soak = "worldcam.cli.rtsp_soak:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"worldcam.ambiguity" = ["prompts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
