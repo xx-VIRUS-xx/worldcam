@@ -98,9 +98,12 @@ class GraphStore(Protocol):
 
     # faces
     def add_face(self, embedding: Sequence[float], *, quality: float, ts: float,
-                 snapshot_path: Optional[str], cluster_id: Optional[str] = None) -> tuple[str, str]:
+                 snapshot_path: Optional[str], cluster_id: Optional[str] = None,
+                 new_cluster: bool = False) -> tuple[str, str]:
         """Store a face. If cluster_id is None, join the best cluster above the
-        store's cluster threshold or start a new one. Returns (face_id, cluster_id)."""
+        store's cluster threshold or start a new one; new_cluster=True always
+        starts a new one (used for CONFLICT faces so they can't inherit either
+        disputed person). Returns (face_id, cluster_id)."""
     def match_face(self, embedding: Sequence[float], k: int = 3) -> list[FaceMatch]: ...
     def label_face_cluster(self, cluster_id: str, person_id: str) -> None: ...
     def cluster_size(self, cluster_id: str) -> int: ...
@@ -241,10 +244,12 @@ class InMemoryGraphStore:
         return sorted(set(paths))
 
     # faces
-    def add_face(self, embedding, *, quality, ts, snapshot_path, cluster_id=None):
+    def add_face(self, embedding, *, quality, ts, snapshot_path, cluster_id=None, new_cluster=False):
+        if new_cluster and cluster_id is not None:
+            raise ValueError("cluster_id and new_cluster are exclusive")
         emb = [float(x) for x in embedding]
         if cluster_id is None:
-            best = self.match_face(emb, k=1)
+            best = [] if new_cluster else self.match_face(emb, k=1)
             if best and best[0].score >= self.cluster_threshold:
                 cluster_id = best[0].cluster_id
             else:

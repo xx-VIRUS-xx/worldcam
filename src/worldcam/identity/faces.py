@@ -223,7 +223,8 @@ class FaceAnalyzer:
             return []
         src_box = track.best.box if track.best is not None else track.box
         ts = float(ts if ts is not None else (track.best.ts if track.best is not None else track.last_ts))
-        region = crop_region(src_box, self.crop_pad)
+        best_region = getattr(track.best, "crop_box", None) if track.best is not None else None
+        region = best_region or crop_region(src_box, self.crop_pad)
         h, w = crop_bgr.shape[:2]
 
         obs: list[FaceObservation] = []

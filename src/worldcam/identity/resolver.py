@@ -217,8 +217,9 @@ class IdentityResolver:
                 if prev_c:
                     cands = tuple(sorted(cands + (prev_c,), key=lambda c: c.score, reverse=True))
 
-        face_id, cluster_id = self.store.add_face(face.embedding, quality=face.quality, ts=face.ts,
-                                                  snapshot_path=face.crop_path, cluster_id=force_cluster)
+        face_id, cluster_id = self.store.add_face(
+            face.embedding, quality=face.quality, ts=face.ts, snapshot_path=face.crop_path,
+            cluster_id=force_cluster, new_cluster=decision is Decision.CONFLICT)
         size = self.store.cluster_size(cluster_id)
         person_id = top_l.person_id if decision is Decision.MATCHED else None
         sighting_id = self.store.add_sighting(Sighting(

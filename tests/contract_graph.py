@@ -480,3 +480,12 @@ def test_neo4j_from_env_and_no_arg_constructor(neo4j_driver):
                  lambda: Neo4jGraphStore(init_schema=False)):
         with make() as s:
             assert s.graph_read("RETURN 1 AS one") == [{"one": 1}]
+
+
+def test_add_face_new_cluster_never_joins_existing(store, rng):
+    v = unit(rng)
+    _, c1 = store.add_face(v, quality=0.9, ts=1.0, snapshot_path=None)
+    _, c2 = store.add_face(v, quality=0.9, ts=2.0, snapshot_path=None, new_cluster=True)
+    assert c1 != c2 and store.cluster_size(c1) == 1 and store.cluster_size(c2) == 1
+    with pytest.raises(ValueError):
+        store.add_face(v, quality=0.9, ts=3.0, snapshot_path=None, cluster_id=c1, new_cluster=True)

@@ -184,8 +184,12 @@ class IouTracker:
             src = ("src=sub", "main_unavailable")
         if any(s.startswith("src=sub") for s in src):
             self.stats["best_fallback_sub"] += 1
+        bw, bh = d.box[2] - d.box[0], d.box[3] - d.box[1]
+        p = self.crop_pad
+        crop_box = (max(0.0, d.box[0] - p * bw), max(0.0, d.box[1] - p * bh),
+                    min(1.0, d.box[2] + p * bw), min(1.0, d.box[3] + p * bh))
         t.best = BestSnapshot(seq=frame.seq, ts=frame.ts, box=d.box, score=score,
-                              crop=img, reasons=tuple(tags) + tuple(src))
+                              crop=img, reasons=tuple(tags) + tuple(src), crop_box=crop_box)
         t.best_parts = {"conf": d.conf, "area": area, "sharp": sharp}
         self.stats["best_updates"] += 1
 

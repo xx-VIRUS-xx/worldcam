@@ -314,14 +314,16 @@ class Neo4jGraphStore:
             index=self._centroid_index, kk=max(int(k), 10), emb=emb, k=int(k))
         return [FaceMatch(r["id"], r["person_id"], 2.0 * r["score"] - 1.0) for r in rows]
 
-    def add_face(self, embedding, *, quality, ts, snapshot_path, cluster_id=None):
+    def add_face(self, embedding, *, quality, ts, snapshot_path, cluster_id=None, new_cluster=False):
+        if new_cluster and cluster_id is not None:
+            raise ValueError("cluster_id and new_cluster are exclusive")
         emb = self._emb(embedding)
         fid = new_id("f")
 
         def tx_fn(tx):
             cid = cluster_id
             if cid is None:
-                best = self._match_tx(tx, emb, 1)
+                best = [] if new_cluster else self._match_tx(tx, emb, 1)
                 if best and best[0].score >= self.cluster_threshold:
                     cid = best[0].cluster_id
                 else:

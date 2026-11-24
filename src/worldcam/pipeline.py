@@ -57,6 +57,8 @@ class BestSnapshot:
     score: float
     crop: Optional[np.ndarray] = None   # full-res crop taken from the mainstream
     reasons: tuple[str, ...] = ()       # why it won: ("largest", "face_visible")
+    crop_box: Optional[Box] = None      # normalized frame region `crop` covers (box + padding,
+                                        # clamped). Lets identity map face boxes back exactly.
 
 
 @dataclass(frozen=True)
