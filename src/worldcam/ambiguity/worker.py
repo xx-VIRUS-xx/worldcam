@@ -216,3 +216,72 @@ class FakeWorkerRunner:
             return WorkerResult(False, error=f"{type(e).__name__}: {e}")
         ok = obj["action"] != "error"
         return WorkerResult(ok, obj["action"], obj["summary"], None if ok else obj["summary"], data=obj)
+
+
+# ---- config-driven runners (models layer) ------------------------------------
+MODE_TASK = {"ask": "question", "resolve": "resolve"}     # worker mode -> ModelRouter task
+
+
+class RoutedWorkerRunner:
+    """Worker runner chosen per mode by a ModelRouter. Backend `claude` uses the verified
+    ClaudeWorkerRunner (dedicated MCP sandbox); other backends (gemini) run the generic
+    ToolRunner path over `build_toolset` (same tools, same scope and confinement)."""
+
+    def __init__(self, store_spec: str, snapshot_dir: str, router, *, claude_model: Optional[str] = None,
+                 timeout_s: float = 120.0, max_turns: int = 12, max_rounds: int = 3):
+        from worldcam.models.router import parse_spec
+        self.store_spec, self.snapshot_dir = store_spec, snapshot_dir
+        self.router, self.timeout_s, self.max_turns, self.max_rounds = router, timeout_s, max_turns, max_rounds
+        self._claude: dict[str, ClaudeWorkerRunner] = {}
+        self._runners: dict[str, Any] = {}
+        for mode, task in MODE_TASK.items():
+            backend, model = parse_spec(router.describe()[task])
+            runner = router.runner(task)               # NotConfigured here = fail at startup, not mid-run
+            if backend == "claude":
+                self._claude[mode] = ClaudeWorkerRunner(
+                    store_spec, snapshot_dir, model=claude_model or (model if model != "default" else None),
+                    timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
+            else:
+                self._runners[mode] = (task, runner)
+
+    def run(self, mode: str, doubt: Doubt) -> WorkerResult:
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}")
+        if mode in self._claude:
+            return self._claude[mode].run(mode, doubt)
+        from worldcam.ambiguity.tools import build_toolset
+        from worldcam.models.api import AgentRunRequest
+        t0 = time.monotonic()
+        task, runner = self._runners[mode]
+        try:
+            req = AgentRunRequest(
+                task=task, prompt=(PROMPTS / f"{mode}.md").read_text().format(doubt_id=doubt.id),
+                system=(PROMPTS / "system.md").read_text(),
+                toolset=build_toolset(self.store_spec, self.snapshot_dir, doubt.id, self.max_rounds),
+                output_schema=load_schema(), max_turns=self.max_turns, timeout_s=self.timeout_s)
+            res = runner.run(req)
+            if not res.ok:
+                return WorkerResult(False, error=res.error, wall_s=time.monotonic() - t0)
+            obj = validate_result(res.data)
+        except Exception as e:
+            return WorkerResult(False, error=f"{type(e).__name__}: {e}", wall_s=time.monotonic() - t0)
+        ok = obj["action"] != "error"
+        return WorkerResult(ok, obj["action"], obj["summary"], None if ok else obj["summary"],
+                            wall_s=time.monotonic() - t0, cost_usd=res.usage.get("cost_usd"), data=obj)
+
+
+def make_worker_runner(store_spec: str, snapshot_dir: str, *, router=None, worker: Optional[str] = None,
+                       worker_model: Optional[str] = None, **kw) -> "WorkerRunner":
+    """Build the engine's WorkerRunner from explicit config (no silent backend switching).
+
+    worker=None / "router": per-mode backend from the ModelRouter (models.json, tasks `question`
+    for ask mode and `resolve` for resolve mode). worker="claude" / "claude:sonnet" / "gemini:<model>":
+    force that backend for both modes (the old `--worker` flag). worker_model is the old
+    `--worker-model` (applies to claude). Raises NotConfigured when credentials are missing."""
+    from worldcam.models.router import ConfiguredModelRouter
+    if worker in (None, "", "router"):
+        router = router or ConfiguredModelRouter()
+    else:
+        spec = worker if ":" in worker else f"{worker}:{worker_model or 'default'}"
+        router = ConfiguredModelRouter(config={"question": spec, "resolve": spec})
+    return RoutedWorkerRunner(store_spec, snapshot_dir, router, claude_model=worker_model, **kw)

@@ -1,0 +1,14 @@
+{
+  "agent": "claude:sonnet",
+  "chat": "claude:sonnet",
+  "question": "claude:haiku",
+  "resolve": "claude:sonnet",
+  "vision_crop": "gemini:gemini-2.5-flash",
+  "vision_scene": "gemini:gemini-2.5-flash",
+  "decide": "claude:haiku",
+  "summarize": "claude:sonnet",
+  "options": {
+    "claude_bin": "claude",
+    "usage_log": "captures/usage.jsonl"
+  }
+}
