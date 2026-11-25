@@ -54,7 +54,9 @@ class EventStore(Protocol):
     def purge_before(self, ts: float) -> list[str]:
         """Retention. Returns snapshot paths the caller must delete from disk."""
     def forget_subject(self, subject_id: str) -> list[str]:
-        """Hard-delete a subject's events. Returns snapshot paths to delete."""
+        """Hard-delete a subject's events AND routines. Returns snapshot paths to delete."""
+    def delete_event(self, event_id: str) -> list[str]:
+        """Delete one event; returns its snapshot paths (retention, corrections)."""
 
 
 ROUTINE_KINDS = ("daily_at", "weekday_at", "interval", "presence_window")
@@ -146,7 +148,12 @@ class InMemoryEventStore:
         gone = [e for e in self.events.values() if e.subject_id == subject_id]
         for e in gone:
             del self.events[e.id]
+        self.routines = {k: r for k, r in self.routines.items() if r.subject_id != subject_id}
         return sorted({p for e in gone for p in e.snapshot_paths})
+
+    def delete_event(self, event_id):
+        e = self.events.pop(event_id, None)
+        return list(e.snapshot_paths) if e else []
 
     # minimal routine support so consumers can be tested against one object
     def upsert_routine(self, r):
