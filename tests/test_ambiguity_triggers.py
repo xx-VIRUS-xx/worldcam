@@ -96,3 +96,32 @@ def test_metadata_gap_not_for_complete_person_or_owner(store):
 def test_bad_signal_kind():
     with pytest.raises(ValueError):
         IdentitySignal("weird")
+    with pytest.raises(ValueError):
+        IdentitySignal("unknown_entity", entity_type="alien")
+
+
+def test_unknown_entity_and_animal_metadata_gap(store):
+    det = DoubtDetector(store, TriggerConfig(entity_min_sightings=1, metadata_min_sightings=3,
+                                             ignore_cooldown_days=1))
+    store.add_sighting(Sighting("s_1", 10.0, "door", 1, entity_label="backpack", snapshot_path="/x/b.jpg"))
+    sig = IdentitySignal("unknown_entity", track_id=1, crop_path="/x/b.jpg", ts=10.0,
+                         entity_type="object", entity_label="backpack", entity_key="ek_object_backpack_door",
+                         sighting_id="s_1", zones=("door",))
+    did = det.observe(sig, now=10.0)
+    assert did is not None
+    d = store.get_doubt(did)
+    assert d.kind == "unknown_entity" and d.about_ids == ("s_1",)
+    # Dedup while active
+    assert det.observe(sig, now=11.0) is None
+    # Cooldown when ignored
+    store.update_doubt(did, status="dismissed", detail={**d.detail, "ignored_by_owner": True, "dismissed_at": 11.0})
+    assert det.observe(sig, now=100.0) is None
+    assert det.observe(sig, now=2 * 86400) is not None
+
+    # Animal metadata_gap checks animal required facts (species_or_breed, relation_to_owner)
+    dog_id = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog")
+    for i in range(3):
+        sight(store, person_id=dog_id, ts=float(i))
+    gap_id = det.observe(IdentitySignal("matched", person_id=dog_id, entity_type="animal", entity_label="dog"))
+    assert gap_id is not None
+    assert store.get_doubt(gap_id).detail["missing"] == ["species_or_breed", "relation_to_owner"]

@@ -1,13 +1,13 @@
-"""Live smoke test: real `claude -p` worker + file: store + in-memory notifier.
+"""Live smoke test: real Gemini or `claude -p` worker + file: store + in-memory notifier.
 
     PYTHONPATH=src python -m worldcam.ambiguity.smoke --dir /tmp/wc-smoke \
-        --reply "That's my colleague Rahul from work, he visits on Fridays"
+        --worker gemini --entity-kind animal \
+        --reply "That's Bruno, our golden retriever, he loves sleeping by the door"
 
-Seeds an unknown_face doubt (3 sightings of one face cluster, dummy crop),
+Seeds an unknown_face (person) or unknown_entity (animal/object) doubt,
 runs engine.tick() (worker in `ask` mode), feeds the reply to
 engine.handle_reply(), runs engine.tick() again (worker in `resolve` mode) and
-prints the resulting graph. Uses the owner's Claude login; no camera, no Neo4j,
-no Telegram.
+prints the resulting graph. No camera, no Neo4j, no Telegram.
 """
 from __future__ import annotations
 
@@ -20,12 +20,12 @@ import time
 from worldcam.ambiguity.engine import AmbiguityEngine, EngineConfig
 from worldcam.ambiguity.file_store import FileGraphStore
 from worldcam.ambiguity.triggers import DoubtDetector, IdentitySignal
-from worldcam.ambiguity.worker import ClaudeWorkerRunner
+from worldcam.ambiguity.worker import ClaudeWorkerRunner, GeminiWorkerRunner, make_worker_runner
 from worldcam.graph.api import Sighting, new_id
 from worldcam.messenger.base import FakeNotifier, OwnerReply
 
 
-class TimedRunner(ClaudeWorkerRunner):
+class TimedClaudeRunner(ClaudeWorkerRunner):
     def run(self, mode, doubt):
         res = super().run(mode, doubt)
         try:
@@ -34,36 +34,72 @@ class TimedRunner(ClaudeWorkerRunner):
                                                "total_cost_usd", "permission_denials", "structured_output")}
         except Exception:
             trimmed = {"raw": self.last_stdout[:300]}
-        print(f"\n--- worker {mode} ({res.wall_s:.1f}s wall) ok={res.ok} error={res.error}")
+        print(f"\n--- claude {mode} ({res.wall_s:.1f}s wall) ok={res.ok} error={res.error}")
         print(json.dumps(trimmed, indent=1))
         return res
 
 
-def seed(store: FileGraphStore, snaps: str) -> str:
-    os.makedirs(snaps, exist_ok=True)
-    crop = os.path.join(snaps, "door_crop_001.jpg")
+class TimedGeminiRunner(GeminiWorkerRunner):
+    def run(self, mode, doubt):
+        res = super().run(mode, doubt)
+        print(f"\n--- gemini {mode} ({res.wall_s:.1f}s wall, model={self.model}) ok={res.ok} error={res.error}")
+        print(json.dumps(res.data, indent=1))
+        return res
+
+
+def _dummy_crop(path: str, kind: str) -> None:
     try:
-        import numpy as np, cv2  # noqa: E401
-        img = np.full((96, 96, 3), 180, np.uint8)
-        cv2.circle(img, (48, 44), 28, (90, 120, 200), -1)
-        cv2.imwrite(crop, img)
+        import cv2
+        import numpy as np
+        img = np.full((128, 128, 3), 210, np.uint8)
+        if kind == "animal":
+            cv2.ellipse(img, (64, 72), (38, 28), 0, 0, 360, (60, 140, 210), -1)
+            cv2.circle(img, (44, 46), 14, (60, 140, 210), -1)
+        elif kind == "object":
+            cv2.rectangle(img, (28, 28), (100, 108), (40, 40, 45), -1)
+            cv2.rectangle(img, (40, 46), (88, 70), (50, 70, 200), -1)
+        else:
+            cv2.circle(img, (64, 56), 32, (90, 120, 200), -1)
+        cv2.imwrite(path, img)
     except Exception:
-        open(crop, "wb").write(b"\xff\xd8\xff\xe0dummy\xff\xd9")
+        with open(path, "wb") as f:
+            f.write(b"\xff\xd8\xff\xe0dummy\xff\xd9")
+
+
+def seed(store: FileGraphStore, snaps: str, entity_kind: str = "person") -> str:
+    os.makedirs(snaps, exist_ok=True)
+    crop = os.path.join(snaps, f"door_{entity_kind}_001.jpg")
+    _dummy_crop(crop, entity_kind)
     owner = store.upsert_person(name="Owner", kind="owner")
     store.upsert_person(name="Prabhat", kind="household")
-    rnd = random.Random(7)
-    base = [rnd.gauss(0, 1) for _ in range(512)]
     t0 = time.time() - 3 * 3600
-    cid = None
-    for i in range(3):
-        emb = [b + rnd.gauss(0, 0.05) for b in base]
-        _, cid = store.add_face(emb, quality=0.9, ts=t0 + i * 3600, snapshot_path=crop, cluster_id=cid)
-        store.add_sighting(Sighting(new_id("s"), t0 + i * 3600, "door", 10 + i, cluster_id=cid,
-                                    zones=("door",), snapshot_path=crop))
-    did = DoubtDetector(store).observe(IdentitySignal("unknown_cluster", track_id=12, cluster_id=cid,
-                                                      crop_path=crop, ts=t0 + 7200))
-    assert did, "detector did not open a doubt"
-    print(f"seeded owner={owner} cluster={cid} doubt={did}")
+
+    if entity_kind == "person":
+        rnd = random.Random(7)
+        base = [rnd.gauss(0, 1) for _ in range(512)]
+        cid = None
+        for i in range(3):
+            emb = [b + rnd.gauss(0, 0.05) for b in base]
+            _, cid = store.add_face(emb, quality=0.9, ts=t0 + i * 3600, snapshot_path=crop, cluster_id=cid)
+            store.add_sighting(Sighting(new_id("s"), t0 + i * 3600, "door", 10 + i, cluster_id=cid,
+                                        zones=("door",), snapshot_path=crop, entity_label="person"))
+        did = DoubtDetector(store).observe(IdentitySignal("unknown_cluster", track_id=12, cluster_id=cid,
+                                                          crop_path=crop, ts=t0 + 7200))
+        assert did, "detector did not open a doubt"
+        print(f"seeded owner={owner} cluster={cid} doubt={did}")
+        return did
+
+    label = "dog" if entity_kind == "animal" else "backpack"
+    sid = new_id("s")
+    store.add_sighting(Sighting(sid, t0 + 7200, "door", 21, zones=("door",), snapshot_path=crop,
+                                entity_label=label))
+    did = DoubtDetector(store).observe(IdentitySignal(
+        kind="unknown_entity", track_id=21, crop_path=crop, ts=t0 + 7200,
+        entity_type=entity_kind, entity_label=label, entity_key=f"ek_{entity_kind}_{label}_door",
+        sighting_id=sid, zones=("door",),
+    ))
+    assert did, "detector did not open an entity doubt"
+    print(f"seeded owner={owner} entity_type={entity_kind} label={label} sighting={sid} doubt={did}")
     return did
 
 
@@ -71,14 +107,16 @@ def show(store: FileGraphStore, did: str) -> None:
     g = store.snapshot()
     d = g.doubts[did]
     print("\n=== graph after run ===")
-    print(json.dumps({"doubt": {"status": d.status, "rounds": d.rounds, "question": d.question,
-                                "answer": d.answer, "last_error": d.last_error,
+    print(json.dumps({"doubt": {"status": d.status, "kind": d.kind, "rounds": d.rounds,
+                                "question": d.question, "answer": d.answer,
+                                "last_error": d.last_error,
                                 "resolution": d.detail.get("resolution"),
                                 "dismissed_reason": d.detail.get("dismissed_reason")},
-                      "people": [{"id": p.id, "name": p.name, "kind": p.kind,
-                                  "persona": p.persona_summary} for p in g.people.values()],
+                      "entities": [{"id": p.id, "name": p.name, "entity_type": p.entity_type,
+                                    "label": p.label, "kind": p.kind,
+                                    "persona": p.persona_summary} for p in g.people.values()],
                       "clusters": {cid: c["person_id"] for cid, c in g.clusters.items()},
-                      "facts": [{"person": f.person_id, "key": f.key, "value": f.value,
+                      "facts": [{"entity": f.person_id, "key": f.key, "value": f.value,
                                  "source": f.source, "confidence": f.confidence} for f in g._facts.values()],
                       "relations": g._rels}, indent=1))
 
@@ -87,6 +125,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--reply", required=True)
+    ap.add_argument("--worker", choices=("auto", "gemini", "claude"), default="auto")
+    ap.add_argument("--entity-kind", choices=("person", "animal", "object"), default="person")
     ap.add_argument("--model", default=None)
     ap.add_argument("--claude", default="claude")
     a = ap.parse_args()
@@ -95,10 +135,13 @@ def main() -> int:
     if os.path.exists(path):
         os.remove(path)
     store = FileGraphStore(path)
-    did = seed(store, snaps)
-    runner = TimedRunner(f"file:{path}", snaps, claude_bin=a.claude, model=a.model)
+    did = seed(store, snaps, entity_kind=a.entity_kind)
+    base_runner = make_worker_runner(a.worker, f"file:{path}", snaps, model=a.model, claude_bin=a.claude)
+    if isinstance(base_runner, GeminiWorkerRunner):
+        runner = TimedGeminiRunner(f"file:{path}", snaps, model=a.model)
+    else:
+        runner = TimedClaudeRunner(f"file:{path}", snaps, claude_bin=a.claude, model=a.model)
     notifier = FakeNotifier()
-    # quiet hours disabled so the smoke test runs at any time of day
     eng = AmbiguityEngine(store, notifier, runner, EngineConfig(snapshot_dir=snaps, quiet_start_hour=0,
                                                                 quiet_end_hour=0))
     rep = eng.tick()

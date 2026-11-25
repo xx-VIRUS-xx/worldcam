@@ -147,9 +147,18 @@ worldcam-telegram-setup                       # after putting TELEGRAM_BOT_TOKEN
 Run:
 
 ```bash
-worldcam-run --source 0                       # everything, questions go to Telegram
+worldcam-run --source 0                       # everything, questions go to Telegram (auto selects Gemini if GEMINI_API_KEY is set)
+worldcam-run --source 0 --worker gemini       # force Gemini API worker (reads GEMINI_API_KEY from .env)
+worldcam-run --source 0 --worker claude       # force claude -p worker
 worldcam-run --source 0 --notifier log        # questions only logged (no Telegram)
 worldcam-run --source 0 --no-engine           # detect + identify + store, never ask
+```
+
+Smoke test Gemini on a person, animal, or object without a camera or Telegram:
+```bash
+PYTHONPATH=src .venv/bin/python -m worldcam.ambiguity.smoke --dir /tmp/wc-smoke \
+  --worker gemini --entity-kind animal \
+  --reply "That's Bruno, our golden retriever, he usually sleeps by the door"
 ```
 
 What happens: a person is tracked, and their best snapshot's face is embedded

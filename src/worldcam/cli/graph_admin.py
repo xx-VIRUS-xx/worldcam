@@ -57,14 +57,15 @@ def cmd_status(store, a):
 
 def cmd_people(store, a):
     for p in store.list_people(limit=a.limit):
-        print(f"{p.id}  {p.kind:<9} {p.name or '(unnamed)':<24} last seen {_fmt_ts(p.last_seen)}"
+        tag = f"{p.entity_type}/{p.label}" if p.label else p.entity_type
+        print(f"{p.id}  {tag:<16} {p.kind:<10} {p.name or '(unnamed)':<24} last seen {_fmt_ts(p.last_seen)}"
               + (f"  aka {', '.join(p.aliases)}" if p.aliases else ""))
 
 
 def cmd_show(store, a):
     p = _resolve_person(store, a.person)
     ctx = store.person_context(p.id)
-    print(f"{p.id}  {p.name or '(unnamed)'}  kind={p.kind}  aliases={list(p.aliases)}")
+    print(f"{p.id}  {p.name or '(unnamed)'}  type={p.entity_type}  label={p.label or '-'}  kind={p.kind}  aliases={list(p.aliases)}")
     print(f"first seen {_fmt_ts(p.first_seen)}, last seen {_fmt_ts(p.last_seen)}")
     if p.persona_summary:
         print(f"persona ({_fmt_ts(p.persona_updated)}): {p.persona_summary}")

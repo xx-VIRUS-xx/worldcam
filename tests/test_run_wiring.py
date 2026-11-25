@@ -84,4 +84,12 @@ def test_no_face_and_cached_results_give_no_signal():
 
 def test_parser_defaults():
     a = build_parser().parse_args([])
-    assert a.source == "0" and a.store == "neo4j" and a.notifier == "telegram"
+    assert a.source == "0" and a.store == "neo4j" and a.notifier == "telegram" and a.worker == "auto"
+
+
+def test_run_requires_gemini_key_when_worker_gemini(monkeypatch, capsys):
+    from worldcam.cli.run import main
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr("worldcam.ambiguity.gemini.load_env", lambda *a, **kw: {})
+    assert main(["--worker", "gemini", "--source", "synthetic"]) == 2
+    assert "GEMINI_API_KEY" in capsys.readouterr().err

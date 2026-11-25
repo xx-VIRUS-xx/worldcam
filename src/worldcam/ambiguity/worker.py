@@ -216,3 +216,44 @@ class FakeWorkerRunner:
             return WorkerResult(False, error=f"{type(e).__name__}: {e}")
         ok = obj["action"] != "error"
         return WorkerResult(ok, obj["action"], obj["summary"], None if ok else obj["summary"], data=obj)
+
+
+WORKER_BACKENDS = ("auto", "gemini", "claude")
+
+
+def __getattr__(name: str):
+    if name in ("GeminiWorkerRunner", "get_gemini_setting"):
+        from worldcam.ambiguity import gemini
+        return getattr(gemini, name)
+    raise AttributeError(name)
+
+
+def make_worker_runner(
+    backend: str = "auto",
+    store_spec: str = "neo4j",
+    snapshot_dir: str = "captures/snapshots",
+    *,
+    model: Optional[str] = None,
+    claude_bin: str = "claude",
+    timeout_s: float = 120.0,
+    max_turns: int = 12,
+    max_rounds: int = 3,
+) -> WorkerRunner:
+    """Construct the ambiguity worker runner (`gemini`, `claude`, or `auto`).
+
+    `auto` uses Gemini when GEMINI_API_KEY is set (env or .env), otherwise `claude -p`.
+    """
+    from worldcam.ambiguity.gemini import GeminiWorkerRunner, get_gemini_setting
+
+    if backend not in WORKER_BACKENDS:
+        raise ValueError(f"worker backend must be one of {WORKER_BACKENDS}, got {backend!r}")
+    use_gemini = backend == "gemini" or (backend == "auto" and bool(get_gemini_setting("GEMINI_API_KEY")))
+    if use_gemini:
+        return GeminiWorkerRunner(
+            store_spec, snapshot_dir, model=model, timeout_s=timeout_s,
+            max_turns=max_turns, max_rounds=max_rounds,
+        )
+    return ClaudeWorkerRunner(
+        store_spec, snapshot_dir, claude_bin=claude_bin, model=model,
+        timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds,
+    )

@@ -59,9 +59,14 @@ def build_server(tools: WorldcamTools):
 
     @wrap
     def upsert_person(name: Optional[str] = None, kind: Optional[str] = None,
-                      aliases: Optional[list[str]] = None, person_id: Optional[str] = None) -> dict:
-        """Create a person (name required) or update one in this doubt's scope. kind: household|visitor|unknown."""
-        return tools.upsert_person(name=name, kind=kind, aliases=aliases or [], person_id=person_id)
+                      aliases: Optional[list[str]] = None, person_id: Optional[str] = None,
+                      entity_type: Optional[str] = None, label: Optional[str] = None) -> dict:
+        """Create or update an entity (person, animal, object, other) in this doubt's scope.
+        entity_type: person|animal|object|other. kind depends on entity_type (person: household|visitor|unknown;
+        animal: pet|stray|wildlife|visitor|unknown; object: belonging|device|furniture|package|vehicle|unknown).
+        label: short class/type tag like 'dog', 'cat', 'backpack', 'laptop'."""
+        return tools.upsert_person(name=name, kind=kind, aliases=aliases or [], person_id=person_id,
+                                   entity_type=entity_type, label=label)
 
     @wrap
     def label_face_cluster(cluster_id: str, person_id: str) -> dict:
