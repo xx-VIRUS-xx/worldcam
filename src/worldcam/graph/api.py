@@ -126,8 +126,23 @@ class GraphStore(Protocol):
         starts a new one (used for CONFLICT faces so they can't inherit either
         disputed person). Returns (face_id, cluster_id)."""
     def match_face(self, embedding: Sequence[float], k: int = 3) -> list[FaceMatch]: ...
-    def label_face_cluster(self, cluster_id: str, person_id: str) -> None: ...
+    def label_face_cluster(self, cluster_id: str, person_id: str) -> None:
+        """Also accepts entity cluster ids (so the worker's one labeling tool covers both)."""
     def cluster_size(self, cluster_id: str) -> int: ...
+
+    # entity views (animals / objects; appearance embeddings from perception/reid.py)
+    def add_entity_view(self, label: str, embedding: Sequence[float], *, quality: float, ts: float,
+                        snapshot_path: Optional[str], cluster_id: Optional[str] = None,
+                        new_cluster: bool = False) -> tuple[str, str]:
+        """Store one appearance view of a `label` entity (YOLO class: "dog", "cup", ...).
+        If cluster_id is None, join the best cluster WITH THE SAME LABEL above the
+        store's entity cluster threshold, else start a new one (new_cluster=True
+        always starts one, used for CONFLICT views). Returns (view_id, cluster_id)."""
+    def match_entity(self, label: str, embedding: Sequence[float], k: int = 3) -> list[FaceMatch]:
+        """Nearest entity clusters of the same label, plain cosine, best first.
+        FaceMatch.cluster_id/person_id/score as for faces; a cup never matches a dog."""
+    def label_entity_cluster(self, cluster_id: str, person_id: str) -> None: ...
+    def entity_cluster_size(self, cluster_id: str) -> int: ...
 
     # sightings / facts / relations
     def add_sighting(self, s: Sighting) -> str: ...
@@ -164,8 +179,11 @@ class InMemoryGraphStore:
     """Reference implementation for tests. Not for production: no persistence,
     linear-scan face search."""
 
-    def __init__(self, cluster_threshold: float = 0.45):
+    def __init__(self, cluster_threshold: float = 0.45, entity_cluster_threshold: float = 0.88):
         self.cluster_threshold = cluster_threshold
+        self.entity_cluster_threshold = entity_cluster_threshold
+        self.entity_views: dict[str, dict] = {}     # id -> {label, embedding, cluster_id, quality, ts, snapshot_path}
+        self.entity_clusters: dict[str, dict] = {}  # id -> {label, person_id, centroid, n}
         self.people: dict[str, Person] = {}
         self.faces: dict[str, dict] = {}            # id -> {embedding, cluster_id, quality, ts, snapshot_path}
         self.clusters: dict[str, dict] = {}         # id -> {person_id, centroid, n}
@@ -214,7 +232,7 @@ class InMemoryGraphStore:
         if keep_id == drop_id:
             raise ValueError("cannot merge a person into itself")
         keep, drop = self._need_person(keep_id), self._need_person(drop_id)
-        for cid, c in self.clusters.items():
+        for c in (*self.clusters.values(), *self.entity_clusters.values()):
             if c["person_id"] == drop_id:
                 c["person_id"] = keep_id
         for sid, s in list(self.sightings.items()):
@@ -247,13 +265,22 @@ class InMemoryGraphStore:
         self._need_person(person_id)
         paths: list[str] = []
         cids = [cid for cid, c in self.clusters.items() if c["person_id"] == person_id]
+        ecids = [cid for cid, c in self.entity_clusters.items() if c["person_id"] == person_id]
         for fid, f in list(self.faces.items()):
             if f["cluster_id"] in cids:
                 if f["snapshot_path"]:
                     paths.append(f["snapshot_path"])
                 del self.faces[fid]
+        for vid, v in list(self.entity_views.items()):
+            if v["cluster_id"] in ecids:
+                if v["snapshot_path"]:
+                    paths.append(v["snapshot_path"])
+                del self.entity_views[vid]
         for cid in cids:
             del self.clusters[cid]
+        for cid in ecids:
+            del self.entity_clusters[cid]
+        cids = cids + ecids
         for sid, s in list(self.sightings.items()):
             if s.person_id == person_id or s.cluster_id in cids:
                 if s.snapshot_path:
@@ -296,6 +323,8 @@ class InMemoryGraphStore:
         return sorted(scored, key=lambda m: m.score, reverse=True)[:k]
 
     def label_face_cluster(self, cluster_id, person_id):
+        if cluster_id in self.entity_clusters:       # entity cluster ids work here too (worker tool)
+            return self.label_entity_cluster(cluster_id, person_id)
         self._need_person(person_id)
         self.clusters[cluster_id]["person_id"] = person_id
         for sid, s in list(self.sightings.items()):
@@ -303,12 +332,55 @@ class InMemoryGraphStore:
                 self.sightings[sid] = replace(s, person_id=person_id)
 
     def cluster_size(self, cluster_id):
+        if cluster_id in self.entity_clusters:
+            return self.entity_clusters[cluster_id]["n"]
         return self.clusters[cluster_id]["n"]
+
+    # entity views
+    def add_entity_view(self, label, embedding, *, quality, ts, snapshot_path, cluster_id=None,
+                        new_cluster=False):
+        if new_cluster and cluster_id is not None:
+            raise ValueError("cluster_id and new_cluster are exclusive")
+        label = label.strip().lower()
+        emb = [float(x) for x in embedding]
+        if cluster_id is None:
+            best = [] if new_cluster else self.match_entity(label, emb, k=1)
+            if best and best[0].score >= self.entity_cluster_threshold:
+                cluster_id = best[0].cluster_id
+            else:
+                cluster_id = new_id("ec")
+                self.entity_clusters[cluster_id] = {"label": label, "person_id": None, "centroid": emb, "n": 0}
+        c = self.entity_clusters[cluster_id]
+        n = c["n"]
+        c["centroid"] = [(cv * n + e) / (n + 1) for cv, e in zip(c["centroid"], emb)]
+        c["n"] = n + 1
+        vid = new_id("ev")
+        self.entity_views[vid] = {"label": c["label"], "embedding": emb, "cluster_id": cluster_id,
+                                  "quality": quality, "ts": ts, "snapshot_path": snapshot_path}
+        return vid, cluster_id
+
+    def match_entity(self, label, embedding, k=3):
+        label = label.strip().lower()
+        scored = [FaceMatch(cid, c["person_id"], cosine(embedding, c["centroid"]))
+                  for cid, c in self.entity_clusters.items() if c["label"] == label]
+        return sorted(scored, key=lambda m: m.score, reverse=True)[:k]
+
+    def label_entity_cluster(self, cluster_id, person_id):
+        self._need_person(person_id)
+        self.entity_clusters[cluster_id]["person_id"] = person_id
+        for sid, s in list(self.sightings.items()):
+            if s.cluster_id == cluster_id and s.person_id is None:
+                self.sightings[sid] = replace(s, person_id=person_id)
+
+    def entity_cluster_size(self, cluster_id):
+        return self.entity_clusters[cluster_id]["n"]
 
     # sightings / facts / relations
     def add_sighting(self, s):
-        if s.person_id is None and s.cluster_id and self.clusters.get(s.cluster_id, {}).get("person_id"):
-            s = replace(s, person_id=self.clusters[s.cluster_id]["person_id"])
+        if s.person_id is None and s.cluster_id:
+            c = self.clusters.get(s.cluster_id) or self.entity_clusters.get(s.cluster_id) or {}
+            if c.get("person_id"):
+                s = replace(s, person_id=c["person_id"])
         self.sightings[s.id] = s
         if s.person_id and s.person_id in self.people:
             p = self.people[s.person_id]
@@ -350,7 +422,8 @@ class InMemoryGraphStore:
             "facts": self.facts(person_id),
             "relations": self.relations(person_id),
             "recent_sightings": self.recent_sightings(person_id=person_id, limit=10),
-            "clusters": [cid for cid, c in self.clusters.items() if c["person_id"] == person_id],
+            "clusters": [cid for cid, c in (*self.clusters.items(), *self.entity_clusters.items())
+                         if c["person_id"] == person_id],
         }
 
     # doubts

@@ -63,7 +63,10 @@ class IdentitySignal:
 @dataclass
 class TriggerConfig:
     unknown_min_sightings: int = 3     # N (unknown_face)
-    entity_min_sightings: int = 1      # N (unknown_entity; confirmed tracks with crops)
+    entity_min_sightings: int = 2      # N per entity CLUSTER (a single detection is noise)
+    entity_match_t: float = 0.90       # appearance cosine (perception/reid.py; see docs/reid.md)
+    entity_ask_t: float = 0.80
+    entity_max_new_doubts_per_day: int = 5   # hard cap across all entity doubts (attention budget)
     metadata_min_sightings: int = 5    # K
     match_t: float = 0.45
     ask_t: float = 0.35
@@ -102,10 +105,12 @@ class DoubtDetector:
         return self._create("unknown_face", (cid,), sig, now, {"sightings": n})
 
     def _unknown_entity(self, sig, now):
-        dedup_key = sig.entity_key or sig.cluster_id or sig.person_id or sig.sighting_id
+        dedup_key = sig.cluster_id or sig.entity_key or sig.person_id or sig.sighting_id
         if not dedup_key or self._blocked(dedup_key, now):
             return None
-        if sig.entity_label:
+        if sig.cluster_id:
+            n = self._count(cluster_id=sig.cluster_id)     # per entity cluster, never per label/zone
+        elif sig.entity_label:
             n = sum(1 for s in self.store.recent_sightings(limit=100)
                     if s.entity_label == sig.entity_label and s.person_id is None)
         elif sig.cluster_id:
@@ -113,6 +118,8 @@ class DoubtDetector:
         else:
             n = 1 if sig.sighting_id else 0
         if n < self.cfg.entity_min_sightings:
+            return None
+        if self._entity_cap_reached(now):
             return None
         about = tuple(x for x in (sig.person_id, sig.cluster_id, sig.sighting_id) if x)
         detail = {
@@ -129,10 +136,16 @@ class DoubtDetector:
         if not sig.candidates:
             return None
         pid, score = sig.candidates[0]
-        if not (self.cfg.ask_t <= score < self.cfg.match_t):
+        ent = sig.entity_label is not None
+        ask_t, match_t = ((self.cfg.entity_ask_t, self.cfg.entity_match_t) if ent
+                          else (self.cfg.ask_t, self.cfg.match_t))
+        if not (ask_t <= score < match_t):
             return None
         key = sig.cluster_id or pid
         if self._blocked(key, now):
+            return None
+        if ent and (not sig.cluster_id or self._count(cluster_id=sig.cluster_id) < self.cfg.entity_min_sightings
+                    or self._entity_cap_reached(now)):
             return None
         about = tuple(x for x in (sig.cluster_id, pid) if x)
         return self._create("low_confidence", about, sig, now,
@@ -144,6 +157,10 @@ class DoubtDetector:
             return None
         about = tuple(x for x in (sig.cluster_id,) if x) + pids
         if any(self._blocked(x, now) for x in about if x == sig.cluster_id) or self._same_conflict_open(pids):
+            return None
+        if sig.entity_label is not None and (
+                not sig.cluster_id or self._count(cluster_id=sig.cluster_id) < self.cfg.entity_min_sightings
+                or self._entity_cap_reached(now)):
             return None
         return self._create("conflict", about, sig, now,
                             {"candidates": [[p, round(s, 4)] for p, s in sig.candidates]})
@@ -199,12 +216,25 @@ class DoubtDetector:
                    and now - d.detail.get("dismissed_at", d.updated) < cool
                    for d in self._doubts(("dismissed",)))
 
+    def _entity_cap_reached(self, now: float) -> bool:
+        """Hard cap on new animal/object doubts per rolling day."""
+        cap = self.cfg.entity_max_new_doubts_per_day
+        recent = 0
+        for st in ("open", "asked", "answered", "resolved", "dismissed"):
+            for d in self.store.list_doubts(st, limit=10_000):
+                if d.detail.get("entity_label") and d.kind != "metadata_gap" and now - d.created < 86400:
+                    recent += 1
+        return recent >= cap
+
     def _same_conflict_open(self, pids) -> bool:
         s = set(pids)
         return any(d.kind == "conflict" and s <= set(d.about_ids) for d in self._doubts(ACTIVE_STATUSES))
 
     def _create(self, kind, about, sig, now, detail) -> str:
         detail = dict(detail, signal_kind=sig.kind, track_id=sig.track_id)
+        if sig.entity_label and kind != "metadata_gap":
+            detail.setdefault("entity_type", sig.entity_type)
+            detail.setdefault("entity_label", sig.entity_label)
         snaps = (sig.crop_path,) if sig.crop_path else ()
         return self.store.create_doubt(Doubt(id=new_id("d"), kind=kind, status="open",
                                              about_ids=tuple(about), snapshot_paths=snaps,

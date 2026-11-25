@@ -125,3 +125,52 @@ def test_unknown_entity_and_animal_metadata_gap(store):
     gap_id = det.observe(IdentitySignal("matched", person_id=dog_id, entity_type="animal", entity_label="dog"))
     assert gap_id is not None
     assert store.get_doubt(gap_id).detail["missing"] == ["species_or_breed", "relation_to_owner"]
+
+
+def test_entity_doubt_dedups_by_cluster_and_needs_two_sightings(store):
+    det = DoubtDetector(store)
+    assert det.cfg.entity_min_sightings == 2
+    sig = IdentitySignal("unknown_entity", track_id=1, cluster_id="ec_a", entity_type="object",
+                         entity_label="laptop", sighting_id="s_a1", ts=10.0)
+    sight(store, cluster_id="ec_a")
+    assert det.observe(sig, now=10.0) is None                      # one detection is noise
+    sight(store, cluster_id="ec_a")
+    did = det.observe(sig, now=11.0)
+    d = store.get_doubt(did)
+    assert d.kind == "unknown_entity" and d.about_ids == ("ec_a", "s_a1") and d.detail["entity_key"] == "ec_a"
+    other_zone = IdentitySignal("unknown_entity", cluster_id="ec_a", entity_type="object", entity_label="laptop",
+                                zones=("desk",))
+    assert det.observe(other_zone, now=12.0) is None                # same cluster, other zone: still one doubt
+    sight(store, cluster_id="ec_b")
+    sight(store, cluster_id="ec_b")
+    assert det.observe(IdentitySignal("unknown_entity", cluster_id="ec_b", entity_type="object",
+                                      entity_label="laptop"), now=13.0) is not None
+
+
+def test_entity_low_confidence_uses_appearance_thresholds(store):
+    det = DoubtDetector(store)
+    pid = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog")
+    for _ in range(2):
+        sight(store, cluster_id="ec_x")
+    mk = lambda sc: IdentitySignal("low_confidence", cluster_id="ec_x", entity_type="animal",
+                                   entity_label="dog", candidates=((pid, sc),))
+    assert det.observe(mk(0.70), now=1.0) is None                   # below entity ask_t (0.80)
+    assert det.observe(mk(0.93), now=1.0) is None                   # above match_t: would have matched
+    did = det.observe(mk(0.85), now=1.0)
+    assert store.get_doubt(did).kind == "low_confidence"
+    assert store.get_doubt(did).detail["entity_label"] == "dog"
+
+
+def test_entity_ignore_cooldown_by_cluster_and_daily_cap(store):
+    det = DoubtDetector(store, TriggerConfig(entity_min_sightings=1, entity_max_new_doubts_per_day=2))
+    made = []
+    for i in range(4):
+        cid = f"ec_{i}"
+        sight(store, cluster_id=cid)
+        made.append(det.observe(IdentitySignal("unknown_entity", cluster_id=cid, entity_type="object",
+                                               entity_label="laptop"), now=1000.0 + i))
+    assert [bool(x) for x in made] == [True, True, False, False]
+    # a day later the cap window has moved on
+    sight(store, cluster_id="ec_9")
+    assert det.observe(IdentitySignal("unknown_entity", cluster_id="ec_9", entity_type="object",
+                                      entity_label="laptop"), now=1000.0 + 2 * 86400) is not None
