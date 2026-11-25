@@ -24,9 +24,9 @@ from dataclasses import fields as dc_fields, replace
 from itertools import islice
 from typing import Any, Optional, Sequence
 
-from .api import (DOUBT_KINDS, DOUBT_STATUSES, FACT_SOURCES, PERSON_KINDS, Doubt, Fact,
-                  FaceMatch, Person, Sighting, new_id)
-from .schema import EMBED_DIM, LABELS, apply_prefix, check_prefix, ensure_schema, index_name
+from .api import (DOUBT_KINDS, DOUBT_STATUSES, ENTITY_TYPES, FACT_SOURCES, PERSON_KINDS,
+                  Doubt, Fact, FaceMatch, Person, Sighting, new_id, validate_entity_kind)
+from .schema import EMBED_DIM, ENTITY_EMBED_DIM, LABELS, apply_prefix, check_prefix, ensure_schema, index_name
 
 _DOUBT_FIELDS = {f.name for f in dc_fields(Doubt)}
 _VECTOR_KEYS = ("embedding", "centroid")
@@ -66,6 +66,7 @@ class Neo4jGraphStore:
     def __init__(self, uri: Optional[str] = None, user: Optional[str] = None,
                  password: Optional[str] = None, *, database: Optional[str] = None,
                  cluster_threshold: float = 0.45, label_prefix: str = "", dim: int = EMBED_DIM,
+                 entity_dim: int = ENTITY_EMBED_DIM, entity_cluster_threshold: float = 0.88,
                  init_schema: bool = True, read_timeout_s: float = 10.0, driver=None,
                  connection_timeout_s: float = 5.0):
         from neo4j import GraphDatabase
@@ -77,6 +78,8 @@ class Neo4jGraphStore:
         self.cluster_threshold = cluster_threshold
         self.prefix = check_prefix(label_prefix)
         self.dim = dim
+        self.entity_dim = entity_dim
+        self.entity_cluster_threshold = entity_cluster_threshold
         self.read_timeout_s = read_timeout_s
         self._owns_driver = driver is None
         if driver is None:
@@ -85,9 +88,10 @@ class Neo4jGraphStore:
                 connection_timeout=connection_timeout_s)
         self._driver = driver
         self._centroid_index = index_name("cluster_centroid", self.prefix)
+        self._entity_index = index_name("entity_centroid", self.prefix)
         self._qcache: dict[str, str] = {}
         if init_schema:
-            ensure_schema(self._driver, self.database, self.prefix, dim)
+            ensure_schema(self._driver, self.database, self.prefix, dim, entity_dim=entity_dim)
 
     @classmethod
     def from_env(cls, env_file=None, **kw) -> "Neo4jGraphStore":
@@ -139,14 +143,17 @@ class Neo4jGraphStore:
         return Person(id=p["id"], name=p.get("name"), kind=p.get("kind") or "unknown",
                       aliases=tuple(p.get("aliases") or ()), first_seen=p.get("first_seen", 0.0),
                       last_seen=p.get("last_seen", 0.0), persona_summary=p.get("persona_summary"),
-                      persona_updated=p.get("persona_updated"))
+                      persona_updated=p.get("persona_updated"),
+                      entity_type=p.get("entity_type") or "person",
+                      label=p.get("label"))
 
     @staticmethod
     def _sighting(s: dict) -> Sighting:
         return Sighting(id=s["id"], ts=s["ts"], camera=s["camera"], track_id=s["track_id"],
                         person_id=s.get("person_id"), cluster_id=s.get("cluster_id"),
                         zones=tuple(s.get("zones") or ()), activity=s.get("activity"),
-                        snapshot_path=s.get("snapshot_path"))
+                        snapshot_path=s.get("snapshot_path"),
+                        entity_label=s.get("entity_label"))
 
     @staticmethod
     def _fact(f: dict) -> Fact:
@@ -176,23 +183,34 @@ class Neo4jGraphStore:
         return row["p"]
 
     # ------------------------------------------------------------------ people
-    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None):
+    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None,
+                      entity_type=None, label=None):
         ts = time.time() if ts is None else float(ts)
-        if kind is not None and kind not in PERSON_KINDS:
-            raise ValueError(f"bad kind {kind!r}")
+        if entity_type is not None and entity_type not in ENTITY_TYPES:
+            raise ValueError(f"bad entity_type {entity_type!r}")
+        if entity_type is not None or person_id is None:
+            validate_entity_kind(entity_type or "person", kind)
         pid = person_id or new_id("p")
 
         def tx_fn(tx):
+            if person_id is not None and entity_type is None and kind is not None:
+                row = self._one(tx, "MATCH (p:Person {id: $id}) RETURN p.entity_type AS et", id=pid)
+                eff_type = (row.get("et") if row else None) or "person"
+                validate_entity_kind(eff_type, kind)
             tx.run(self._q("""
                 MERGE (p:Person {id: $id})
                 ON CREATE SET p.name = $name, p.kind = coalesce($kind, 'unknown'),
+                              p.entity_type = coalesce($entity_type, 'person'), p.label = $label,
                               p.aliases = $aliases, p.first_seen = $ts, p.last_seen = $ts
                 ON MATCH SET p.name = coalesce($name_upd, p.name),
                              p.kind = coalesce($kind, p.kind),
+                             p.entity_type = coalesce($entity_type, p.entity_type, 'person'),
+                             p.label = coalesce($label, p.label),
                              p.aliases = reduce(acc = coalesce(p.aliases, []), a IN $aliases |
                                                 CASE WHEN a IN acc THEN acc ELSE acc + a END),
                              p.last_seen = CASE WHEN p.last_seen > $ts THEN p.last_seen ELSE $ts END
                 """), id=pid, name=name, name_upd=name or None, kind=kind or None,
+                entity_type=entity_type or None, label=label or None,
                 aliases=_dedup(str(a) for a in aliases), ts=ts).consume()
         self._write(tx_fn)
         return pid
@@ -236,6 +254,10 @@ class Neo4jGraphStore:
                 MATCH (c:FaceCluster {person_id: $drop}) SET c.person_id = $keep
                 WITH c OPTIONAL MATCH (c)-[r:BELONGS_TO]->() DELETE r
                 WITH DISTINCT c MATCH (k:Person {id: $keep}) MERGE (c)-[:BELONGS_TO]->(k)"""), p).consume()
+            tx.run(self._q("""
+                MATCH (c:EntityCluster {person_id: $drop}) SET c.person_id = $keep
+                WITH c OPTIONAL MATCH (c)-[r:BELONGS_TO]->() DELETE r
+                WITH DISTINCT c MATCH (k:Person {id: $keep}) MERGE (c)-[:BELONGS_TO]->(k)"""), p).consume()
             # sightings
             tx.run(self._q("""
                 MATCH (s:Sighting {person_id: $drop}) SET s.person_id = $keep
@@ -267,16 +289,18 @@ class Neo4jGraphStore:
                 aliases.append(drop["name"])
             tx.run(self._q("""
                 MATCH (k:Person {id: $keep}) SET k.aliases = $aliases,
-                    k.first_seen = $first, k.last_seen = $last
+                    k.first_seen = $first, k.last_seen = $last,
+                    k.label = coalesce(k.label, $drop_label)
                 WITH k MATCH (d:Person {id: $drop}) DETACH DELETE d"""),
                    keep=keep_id, drop=drop_id,
                    aliases=_dedup(a for a in aliases if a != keep.get("name")),
                    first=min(keep.get("first_seen", 0.0), drop.get("first_seen", 0.0)),
-                   last=max(keep.get("last_seen", 0.0), drop.get("last_seen", 0.0))).consume()
+                   last=max(keep.get("last_seen", 0.0), drop.get("last_seen", 0.0)),
+                   drop_label=drop.get("label")).consume()
         self._write(tx_fn)
 
     def forget_person(self, person_id):
-        """Hard delete person, facts, relations, sightings, faces and clusters.
+        """Hard delete person, facts, relations, sightings, faces, entity views and clusters.
         Returns snapshot paths that the caller must delete from disk.
         Doubts about the person or their clusters are deleted too, and their
         snapshot paths returned."""
@@ -284,7 +308,13 @@ class Neo4jGraphStore:
             self._need_person_tx(tx, person_id)
             cids = self._one(tx, "MATCH (c:FaceCluster {person_id: $id}) RETURN collect(c.id) AS c",
                              id=person_id)["c"]
+            ecids = self._one(tx, "MATCH (c:EntityCluster {person_id: $id}) RETURN collect(c.id) AS c",
+                              id=person_id)["c"]
             paths: list[str] = []
+            paths += self._one(tx, """
+                MATCH (v:EntityView) WHERE v.cluster_id IN $ecids
+                WITH v, v.snapshot_path AS sp DETACH DELETE v RETURN collect(sp) AS p""", ecids=ecids)["p"]
+            cids = cids + ecids
             paths += self._one(tx, """
                 MATCH (f:Face) WHERE f.cluster_id IN $cids
                 WITH f, f.snapshot_path AS sp DETACH DELETE f RETURN collect(sp) AS p""", cids=cids)["p"]
@@ -297,6 +327,7 @@ class Neo4jGraphStore:
                 WITH x, coalesce(x.snapshot_paths, []) AS sp DETACH DELETE x
                 RETURN reduce(acc = [], l IN collect(sp) | acc + l) AS p""", id=person_id, cids=cids)["p"]
             tx.run(self._q("MATCH (c:FaceCluster) WHERE c.id IN $cids DETACH DELETE c"), cids=cids).consume()
+            tx.run(self._q("MATCH (c:EntityCluster) WHERE c.id IN $cids DETACH DELETE c"), cids=cids).consume()
             tx.run(self._q("MATCH (f:Fact {person_id: $id}) DETACH DELETE f"), id=person_id).consume()
             tx.run(self._q("MATCH (p:Person {id: $id}) DETACH DELETE p"), id=person_id).consume()
             return sorted({p for p in paths if p})
@@ -357,6 +388,12 @@ class Neo4jGraphStore:
                 WITH c OPTIONAL MATCH (c)-[r:BELONGS_TO]->() DELETE r
                 WITH DISTINCT c MATCH (p:Person {id: $pid}) MERGE (c)-[:BELONGS_TO]->(p)
                 RETURN c.id AS id""", cid=cluster_id, pid=person_id)
+            if row is None:       # entity cluster ids work here too (worker tool)
+                row = self._one(tx, """
+                    MATCH (c:EntityCluster {id: $cid}) SET c.person_id = $pid
+                    WITH c OPTIONAL MATCH (c)-[r:BELONGS_TO]->() DELETE r
+                    WITH DISTINCT c MATCH (p:Person {id: $pid}) MERGE (c)-[:BELONGS_TO]->(p)
+                    RETURN c.id AS id""", cid=cluster_id, pid=person_id)
             if row is None:
                 raise KeyError(f"unknown face cluster {cluster_id}")
             tx.run(self._q("""
@@ -369,6 +406,8 @@ class Neo4jGraphStore:
     def cluster_size(self, cluster_id):
         rows = self._read_rows("MATCH (c:FaceCluster {id: $id}) RETURN c.n_faces AS n", id=cluster_id)
         if not rows:
+            rows = self._read_rows("MATCH (c:EntityCluster {id: $id}) RETURN c.n_views AS n", id=cluster_id)
+        if not rows:
             raise KeyError(f"unknown face cluster {cluster_id}")
         return rows[0]["n"]
 
@@ -379,6 +418,87 @@ class Neo4jGraphStore:
             RETURN c.id AS id, c.person_id AS person_id, c.n_faces AS n_faces, c.created AS created
             ORDER BY c.created LIMIT $limit""", pid=person_id, limit=int(limit))
 
+    # ---------------------------------------------------------- entity views
+    def _eemb(self, embedding: Sequence[float]) -> list[float]:
+        emb = [float(x) for x in embedding]
+        if len(emb) != self.entity_dim:
+            raise ValueError(f"entity embedding has {len(emb)} dims, expected {self.entity_dim}")
+        return emb
+
+    def _match_entity_tx(self, tx, label: str, emb: list[float], k: int) -> list[FaceMatch]:
+        if k <= 0:
+            return []
+        # The vector index is global across labels; over-fetch, then filter to this label.
+        rows = tx.run(self._q("""
+            CALL db.index.vector.queryNodes($index, $kk, $emb) YIELD node
+            WITH node WHERE node.label = $label
+            WITH node, vector.similarity.cosine(node.centroid, $emb) AS score
+            RETURN node.id AS id, node.person_id AS person_id, score
+            ORDER BY score DESC, id LIMIT $k"""),
+            index=self._entity_index, kk=max(int(k) * 20, 200), emb=emb, label=label, k=int(k))
+        return [FaceMatch(r["id"], r["person_id"], 2.0 * r["score"] - 1.0) for r in rows]
+
+    def add_entity_view(self, label, embedding, *, quality, ts, snapshot_path, cluster_id=None,
+                        new_cluster=False):
+        if new_cluster and cluster_id is not None:
+            raise ValueError("cluster_id and new_cluster are exclusive")
+        label = label.strip().lower()
+        emb = self._eemb(embedding)
+        vid = new_id("ev")
+
+        def tx_fn(tx):
+            cid = cluster_id
+            if cid is None:
+                best = [] if new_cluster else self._match_entity_tx(tx, label, emb, 1)
+                if best and best[0].score >= self.entity_cluster_threshold:
+                    cid = best[0].cluster_id
+                else:
+                    cid = new_id("ec")
+                    tx.run(self._q("""CREATE (:EntityCluster {id: $id, label: $label, person_id: null,
+                                      n_views: 0, centroid: $emb, created: $now})"""),
+                           id=cid, label=label, emb=emb, now=time.time()).consume()
+            row = self._one(tx, """
+                MATCH (c:EntityCluster {id: $cid})
+                SET c.centroid = [i IN range(0, size($emb) - 1) |
+                                  (c.centroid[i] * c.n_views + $emb[i]) / (c.n_views + 1)],
+                    c.n_views = c.n_views + 1
+                CREATE (v:EntityView {id: $vid, label: c.label, embedding: $emb, quality: $q, ts: $ts,
+                                      snapshot_path: $sp, cluster_id: $cid})-[:IN]->(c)
+                RETURN c.id AS cid""", cid=cid, emb=emb, vid=vid, q=float(quality), ts=float(ts),
+                            sp=snapshot_path)
+            if row is None:
+                raise KeyError(f"unknown entity cluster {cid}")
+            return cid
+        return vid, self._write(tx_fn)
+
+    def match_entity(self, label, embedding, k=3):
+        label = label.strip().lower()
+        emb = self._eemb(embedding)
+        return self._read(lambda tx: self._match_entity_tx(tx, label, emb, k))
+
+    def label_entity_cluster(self, cluster_id, person_id):
+        def tx_fn(tx):
+            self._need_person_tx(tx, person_id)
+            row = self._one(tx, """
+                MATCH (c:EntityCluster {id: $cid}) SET c.person_id = $pid
+                WITH c OPTIONAL MATCH (c)-[r:BELONGS_TO]->() DELETE r
+                WITH DISTINCT c MATCH (p:Person {id: $pid}) MERGE (c)-[:BELONGS_TO]->(p)
+                RETURN c.id AS id""", cid=cluster_id, pid=person_id)
+            if row is None:
+                raise KeyError(f"unknown entity cluster {cluster_id}")
+            tx.run(self._q("""
+                MATCH (s:Sighting {cluster_id: $cid}) WHERE s.person_id IS NULL
+                SET s.person_id = $pid
+                WITH s MATCH (p:Person {id: $pid}) MERGE (s)-[:OF]->(p)"""),
+                   cid=cluster_id, pid=person_id).consume()
+        self._write(tx_fn)
+
+    def entity_cluster_size(self, cluster_id):
+        rows = self._read_rows("MATCH (c:EntityCluster {id: $id}) RETURN c.n_views AS n", id=cluster_id)
+        if not rows:
+            raise KeyError(f"unknown entity cluster {cluster_id}")
+        return rows[0]["n"]
+
     # --------------------------------------------- sightings / facts / relations
     def add_sighting(self, s):
         sid = s.id or new_id("s")
@@ -386,23 +506,27 @@ class Neo4jGraphStore:
         def tx_fn(tx):
             person_id = s.person_id
             if person_id is None and s.cluster_id:
-                row = self._one(tx, "MATCH (c:FaceCluster {id: $id}) RETURN c.person_id AS pid", id=s.cluster_id)
+                row = (self._one(tx, "MATCH (c:FaceCluster {id: $id}) RETURN c.person_id AS pid", id=s.cluster_id)
+                       or self._one(tx, "MATCH (c:EntityCluster {id: $id}) RETURN c.person_id AS pid",
+                                    id=s.cluster_id))
                 person_id = row["pid"] if row else None
             tx.run(self._q("""
                 MERGE (s:Sighting {id: $id})
                 SET s.ts = $ts, s.camera = $camera, s.track_id = $track_id, s.person_id = $pid,
                     s.cluster_id = $cid, s.zones = $zones, s.activity = $activity,
-                    s.snapshot_path = $sp
+                    s.snapshot_path = $sp, s.entity_label = $elabel
                 WITH s OPTIONAL MATCH (s)-[r:OF]->() DELETE r
                 WITH DISTINCT s
                 OPTIONAL MATCH (p:Person {id: $pid})
                 OPTIONAL MATCH (c:FaceCluster {id: $cid})
+                OPTIONAL MATCH (e:EntityCluster {id: $cid})
                 FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | MERGE (s)-[:OF]->(p)
                     SET p.last_seen = CASE WHEN p.last_seen > $ts THEN p.last_seen ELSE $ts END)
-                FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END | MERGE (s)-[:OF]->(c))"""),
+                FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END | MERGE (s)-[:OF]->(c))
+                FOREACH (_ IN CASE WHEN e IS NULL THEN [] ELSE [1] END | MERGE (s)-[:OF]->(e))"""),
                    id=sid, ts=float(s.ts), camera=s.camera, track_id=int(s.track_id), pid=person_id,
                    cid=s.cluster_id, zones=list(s.zones), activity=s.activity,
-                   sp=s.snapshot_path).consume()
+                   sp=s.snapshot_path, elabel=s.entity_label).consume()
         self._write(tx_fn)
         return sid
 
@@ -466,7 +590,9 @@ class Neo4jGraphStore:
             "facts": self.facts(person_id),
             "relations": self.relations(person_id),
             "recent_sightings": self.recent_sightings(person_id=person_id, limit=10),
-            "clusters": [c["id"] for c in self.list_clusters(person_id)],
+            "clusters": [c["id"] for c in self.list_clusters(person_id)] + [
+                r["id"] for r in self._read_rows(
+                    "MATCH (c:EntityCluster {person_id: $p}) RETURN c.id AS id ORDER BY c.created", p=person_id)],
         }
 
     # ------------------------------------------------------------------ doubts

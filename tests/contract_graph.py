@@ -7,6 +7,7 @@ indexes, wipes only those labels between tests and drops them at the end.
 """
 from __future__ import annotations
 
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -15,7 +16,7 @@ import pytest
 
 from worldcam.graph.api import Doubt, InMemoryGraphStore, Sighting
 
-TEST_PREFIX = "WcTest"
+TEST_PREFIX = f"WcTest{os.getpid()}"   # unique per run: parallel runs must not wipe each other
 DIM = 512
 
 # InMemoryGraphStore deviations from the contract, reported to the coordinator
@@ -113,6 +114,14 @@ def test_upsert_get_and_update_person(store):
     assert store.get_person("p_missing") is None
     with pytest.raises(ValueError):
         store.upsert_person(name="x", kind="alien")
+    dog = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog", ts=10.0)
+    d = store.get_person(dog)
+    assert (d.entity_type, d.label, d.kind) == ("animal", "dog", "pet")
+    bag = store.upsert_person(name="Red Pack", kind="belonging", entity_type="object", label="backpack", ts=11.0)
+    b = store.get_person(bag)
+    assert (b.entity_type, b.label, b.kind) == ("object", "backpack", "belonging")
+    with pytest.raises(ValueError):
+        store.upsert_person(name="x", entity_type="alien")
 
 
 def test_search_people_by_name_and_alias(store):
@@ -489,3 +498,102 @@ def test_add_face_new_cluster_never_joins_existing(store, rng):
     assert c1 != c2 and store.cluster_size(c1) == 1 and store.cluster_size(c2) == 1
     with pytest.raises(ValueError):
         store.add_face(v, quality=0.9, ts=3.0, snapshot_path=None, cluster_id=c1, new_cluster=True)
+
+
+# ------------------------------------------------------------ entity views
+EDIM = 1280   # ENTITY_EMBED_DIM (the Neo4j test index is created with the default)
+
+
+def eunit(rng):
+    v = rng.standard_normal(EDIM)
+    return v / np.linalg.norm(v)
+
+
+def enear(v, rng, eps=0.2):
+    w = v + eps * eunit(rng)
+    return w / np.linalg.norm(w)
+
+
+def test_entity_views_cluster_by_similarity_within_label(store, rng):
+    v = eunit(rng)
+    _, c1 = store.add_entity_view("cup", v, quality=0.9, ts=1.0, snapshot_path="e/1.jpg")
+    _, c2 = store.add_entity_view("cup", enear(v, rng), quality=0.9, ts=2.0, snapshot_path=None)
+    assert c1 == c2 and store.entity_cluster_size(c1) == 2
+    _, c3 = store.add_entity_view("cup", eunit(rng), quality=0.9, ts=3.0, snapshot_path=None)
+    assert c3 != c1
+    # same vector, different label: never joins (a cup is not a dog)
+    _, c4 = store.add_entity_view("dog", v, quality=0.9, ts=4.0, snapshot_path=None)
+    assert c4 not in (c1, c3) and store.entity_cluster_size(c1) == 2
+
+
+def test_match_entity_is_scoped_by_label_and_plain_cosine(store, rng):
+    v = eunit(rng)
+    _, cup = store.add_entity_view("cup", v, quality=0.9, ts=1.0, snapshot_path=None)
+    _, dog = store.add_entity_view("dog", v, quality=0.9, ts=1.0, snapshot_path=None)
+    m = store.match_entity("cup", v, k=5)
+    assert [x.cluster_id for x in m] == [cup]
+    assert m[0].score == pytest.approx(1.0, abs=2e-3) and m[0].person_id is None
+    assert [x.cluster_id for x in store.match_entity("dog", v)] == [dog]
+    assert store.match_entity("laptop", v) == []
+    w = enear(v, rng, eps=1.0)
+    expect = float(np.dot(v, w))
+    assert store.match_entity("cup", w)[0].score == pytest.approx(expect, abs=5e-3)
+    _, cup2 = store.add_entity_view("cup", eunit(rng), quality=0.9, ts=2.0, snapshot_path=None)
+    ranked = store.match_entity("cup", v, k=5)
+    assert [x.cluster_id for x in ranked] == [cup, cup2]
+
+
+def test_entity_cluster_labeling_backfills_sightings(store, rng):
+    v = eunit(rng)
+    _, cid = store.add_entity_view("dog", v, quality=0.9, ts=1.0, snapshot_path=None)
+    store.add_sighting(Sighting("s_e1", 5.0, "cam", 1, cluster_id=cid, entity_label="dog"))
+    bruno = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog")
+    store.label_entity_cluster(cid, bruno)
+    assert store.match_entity("dog", v)[0].person_id == bruno
+    assert store.recent_sightings(person_id=bruno)[0].id == "s_e1"
+    store.add_sighting(Sighting("s_e2", 6.0, "cam", 2, cluster_id=cid, entity_label="dog"))
+    assert {s.id for s in store.recent_sightings(person_id=bruno)} == {"s_e1", "s_e2"}
+    assert cid in store.person_context(bruno)["clusters"]
+    with pytest.raises(KeyError):
+        store.label_entity_cluster("ec_missing", bruno)
+    with pytest.raises(KeyError):
+        store.entity_cluster_size("ec_missing")
+
+
+def test_entity_new_cluster_never_joins(store, rng):
+    v = eunit(rng)
+    _, c1 = store.add_entity_view("cup", v, quality=0.9, ts=1.0, snapshot_path=None)
+    _, c2 = store.add_entity_view("cup", v, quality=0.9, ts=2.0, snapshot_path=None, new_cluster=True)
+    assert c1 != c2
+    with pytest.raises(ValueError):
+        store.add_entity_view("cup", v, quality=0.9, ts=3.0, snapshot_path=None, cluster_id=c1, new_cluster=True)
+
+
+def test_forget_person_removes_entity_views_clusters_and_returns_paths(store, rng):
+    bruno = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog", ts=1.0)
+    mug = store.upsert_person(name="Mug", kind="belonging", entity_type="object", label="cup", ts=1.0)
+    v, w = eunit(rng), eunit(rng)
+    _, dc = store.add_entity_view("dog", v, quality=0.9, ts=1.0, snapshot_path="e/dog1.jpg")
+    store.add_entity_view("dog", enear(v, rng), quality=0.9, ts=2.0, snapshot_path="e/dog2.jpg", cluster_id=dc)
+    store.label_entity_cluster(dc, bruno)
+    _, mc = store.add_entity_view("cup", w, quality=0.9, ts=1.0, snapshot_path="e/cup1.jpg")
+    store.label_entity_cluster(mc, mug)
+    store.add_sighting(Sighting("s_d", 5.0, "cam", 1, cluster_id=dc, entity_label="dog", snapshot_path="e/s.jpg"))
+    did = store.create_doubt(Doubt("", "unknown_entity", about_ids=(dc,), snapshot_paths=("e/d.jpg",)))
+    paths = store.forget_person(bruno)
+    assert paths == ["e/d.jpg", "e/dog1.jpg", "e/dog2.jpg", "e/s.jpg"]
+    assert store.match_entity("dog", v) == []
+    assert [m.cluster_id for m in store.match_entity("cup", w)] == [mc]
+    with pytest.raises(KeyError):
+        store.entity_cluster_size(dc)
+    assert store.get_doubt(did) is None and store.get_person(mug) is not None
+    assert store.recent_sightings() == []
+
+
+def test_merge_people_moves_entity_clusters(store, rng):
+    a = store.upsert_person(name="Mug A", entity_type="object", label="cup")
+    b = store.upsert_person(name="Mug B", entity_type="object", label="cup")
+    _, cid = store.add_entity_view("cup", eunit(rng), quality=0.9, ts=1.0, snapshot_path=None)
+    store.label_entity_cluster(cid, b)
+    store.merge_people(a, b)
+    assert cid in store.person_context(a)["clusters"]
