@@ -204,6 +204,11 @@ class SqliteUserDirectory:
             self._row(db, user_id)
             return self._set(db, user_id, profiles=json.dumps(profiles))
 
+    def set_person(self, user_id, person_id) -> User:
+        with self._tx() as db:
+            self._row(db, user_id)
+            return self._set(db, user_id, person_id=person_id)
+
     def grant(self, user_id, permission) -> User:
         _check_perm(permission)
         with self._tx() as db:

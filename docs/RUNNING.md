@@ -141,12 +141,19 @@ Vision: `docs/VISION.md`. Architecture and file map: `docs/ARCHITECTURE_V2.md`.
 
 ```bash
 worldcam-run --source 0 --channel log                       # dev: messages are logged, nothing sent
+worldcam-run --source 0 --channel log --quiet-hours off    # (default quiet hours 23-8: no questions at night)
 worldcam-run --source 0 --profiles cctv,companion           # which application intents are active
 worldcam-run --source 0 --profiles cctv,companion,medical --scene   # + gated vision scene descriptions
 worldcam-run --source 0 --no-engine                         # eyes + brain only (never asks, never chats)
 ```
 
 First-time setup for real use:
+0. **Tell it which face is you:** `worldcam-enroll` (face the camera for ~15 s; it links your account to your
+   person and labels your face), or `worldcam-enroll --list` then `worldcam-enroll --cluster fc_...` to adopt
+   a face group the camera already saw (check the crop in `captures/snapshots/` first). Until this is done the
+   agent cannot ask you about yourself. After it, it interviews you gently, one question every ~4 h
+   (rooms, household, pets, routine, visitors, privacy; health questions only if the medical profile is on
+   and you consent first).
 1. `worldcam-telegram-setup` (bot token + your chat id into `.env`). You become the owner automatically.
 2. `worldcam-users invite --role caregiver --profiles medical` -> the person sends `/join CODE` to the bot.
 3. Models: `models.json` (copy `models.example.json`) maps each task to `claude:*` / `gemini:*`.

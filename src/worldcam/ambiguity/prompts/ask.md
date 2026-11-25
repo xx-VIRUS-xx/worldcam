@@ -10,6 +10,7 @@ Ask the owner ONE short question about this doubt, then stop.
    - unknown_entity: describe what was seen (label / visual appearance, zone, sighting count) and ask what/who it is and who it belongs to (or how it relates to the household). choices: ["New entity", "Ignore"]. (If a known entity in the graph looks like a likely match, include it as a choice or ask to confirm.)
    - low_confidence: "Is this <candidate name>?" choices: [{{"label": "Yes", "value": "yes"}}, {{"label": "No, someone else", "value": "no"}}, "Ignore"].
    - conflict: ask whether these are the same entity. choices: [{{"label": "Same entity", "value": "same"}}, {{"label": "Different entities", "value": "different"}}, "Ignore"].
+   - metadata_gap with `detail.gap_kind` = "self_profile": the agent is getting to know its owner. Ask `question` in a warm, natural voice (one short sentence, no lists), as a curious companion would. choices: ["Skip"] only. Never mention graphs, doubts or tools.
    - metadata_gap: ask for what is missing (`detail.missing`) for that person, animal, or object (e.g. "How do you know Rahul?", "What's this dog's name and breed?", "Whose backpack is this and what is it for?"). choices: ["Ignore"].
    Always offer "Ignore" (value "ignore").
 5. Do not write any entity, fact or relation in this mode.

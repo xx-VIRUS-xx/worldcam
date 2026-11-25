@@ -284,6 +284,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--entity-labels", default=None,
                     help="comma-separated non-person YOLO labels to track for entity personas "
                          "(default: cat,dog,backpack,handbag,suitcase,laptop; 'none' disables)")
+    ap.add_argument("--animal-conf", type=float, default=0.6,
+                    help="minimum YOLO confidence for animals (blankets and hands get mistaken for cats)")
     ap.add_argument("--entity-cooldown", type=float, default=300.0,
                     help="seconds before re-recording the same non-person entity")
     ap.add_argument("--match-t", type=float, default=0.45)
@@ -488,7 +490,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         grabber = LatestFrameGrabber(main_src)
     grabber_ref["g"] = grabber
-    detector = YoloDetector()
+    from ..perception.filters import ANIMALS, FilteredDetector
+    detector = FilteredDetector(YoloDetector(), {a: args.animal_conf for a in ANIMALS})
     best_labels = (PERSON,) + tuple(l for l in entity_labels if l != PERSON)
     loop = PerceptionLoop(grabber, detector, IouTracker(best_labels=best_labels),
                           gate=None if args.no_motion else FrameDiffMotionGate(),

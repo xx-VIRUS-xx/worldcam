@@ -27,6 +27,30 @@ MEDICAL_WORDS = ("medic", "pill", "dose", "health", "allerg", "diagnos", "doctor
 KIND_VALUE = {"conflict": 3.0, "low_confidence": 2.0, "unknown_face": 2.0, "metadata_gap": 1.0}
 ROLE_ORDER = {"household": 1, "caregiver": 1, "owner": 2, "guest": 3}
 
+# The agent's curiosity about its owner: asked one at a time, gently spaced.
+# (fact_key, question, profiles that care (None = all), topic, needs health-tracking consent)
+OWNER_INTERVIEW = (
+    ("areas", "What are the rooms or areas this camera can see (for example desk, bed, door)? "
+              "I'll use them to understand where things happen.", None, "own_facts", False),
+    ("household", "Who lives here with you? Names and how they're related to you, if you like.",
+     ("companion", "cctv"), "own_facts", False),
+    ("pets", "Do you have any pets? What are their names?", ("companion", "cctv"), "own_facts", False),
+    ("daily_rhythm", "Roughly what does a normal weekday look like for you: when you wake up, work, "
+                     "eat and sleep?", ("companion", "medical"), "own_facts", False),
+    ("regular_visitors", "Who visits regularly (family, friends, delivery, help at home)?",
+     ("cctv", "companion"), "own_facts", False),
+    ("interests", "What do you enjoy? I'd like to be able to chat with you about it.",
+     ("companion",), "own_facts", False),
+    ("privacy_preferences", "Is there anything I should never ask about, or times and places where I "
+                            "should stay quiet?", None, "own_facts", False),
+    ("consent_health_tracking", "Would you like me to keep track of health routines such as medication "
+                                "or meals, and tell a caregiver if something seems off? You can say no.",
+     ("medical",), "own_facts", False),
+    ("care_routines", "Which medication or care routines should I know about, and roughly when?",
+     ("medical",), "medical", True),
+    ("care_contacts", "Who should I tell if something seems wrong, and how?", ("medical",), "medical", True),
+)
+
 
 @dataclass
 class Gap:
@@ -39,6 +63,7 @@ class Gap:
     snapshot_paths: tuple = ()
     profile: Optional[str] = None
     priority: int = 1
+    extra: dict = field(default_factory=dict)     # merged into the doubt's detail (e.g. fact_key)
 
 
 @dataclass
@@ -69,6 +94,7 @@ class UncertaintyConfig:
     gap_cooldown_days: float = 14.0
     max_open_curiosity: int = 2
     ambiguous_routine_band: tuple = (0.35, 0.7)
+    self_interview_gap_s: float = 4 * 3600.0     # minimum time between questions about the owner
 
 
 class UncertaintyManager:
@@ -223,6 +249,9 @@ class UncertaintyManager:
             people = []
         for p in people:
             if p.kind == "owner":
+                g = self._owner_gap(p, now, taken)
+                if g is not None:
+                    gaps.append(g)
                 continue
             try:
                 sights = self.graph.recent_sightings(person_id=p.id, limit=50)
@@ -260,6 +289,33 @@ class UncertaintyManager:
         gaps = [g for g in gaps if g.key not in taken]
         return sorted(gaps, key=lambda g: -g.value)[:limit]
 
+    def _owner_gap(self, owner, now: float, taken: set) -> Optional[Gap]:
+        """The next unanswered question of the owner interview, or None.
+        One at a time: nothing while an earlier one is still open, and a pause between them.
+        Only meaningful once a user is linked to this person (see worldcam-enroll)."""
+        if not any(u.person_id == owner.id for u in self.users.list()):
+            return None
+        mine = [d for d in self.graph.list_doubts(None, 10_000) if d.detail.get("gap_kind") == "self_profile"
+                and owner.id in d.about_ids]
+        if any(d.status in ("open", "asked", "answered") for d in mine):
+            return None
+        if mine and now - max(d.created for d in mine) < self.cfg.self_interview_gap_s:
+            return None
+        active = set(self.profiles.names()) if self.profiles else set()
+        facts = {f.key: (f.value or "").strip().lower() for f in self.graph.facts(owner.id)}
+        consent = facts.get("consent_health_tracking", "").startswith(("y", "ok", "sure", "please", "of course"))
+        for i, (key, question, profiles, topic, needs_consent) in enumerate(OWNER_INTERVIEW):
+            if profiles and active and not (set(profiles) & active):
+                continue
+            if key in facts or f"self:{owner.id}:{key}" in taken:
+                continue
+            if needs_consent and not consent:
+                continue
+            return Gap(f"self:{owner.id}:{key}", "self_profile", topic, owner.id, question,
+                       value=2.5 - 0.05 * i, profile=(profiles[0] if profiles and len(profiles) == 1 else None),
+                       extra={"fact_key": key})
+        return None
+
     def best_gap(self, now: Optional[float] = None) -> Optional[Gap]:
         """Most valuable gap that somebody can currently be asked about."""
         now = self.clock() if now is None else now
@@ -274,7 +330,8 @@ class UncertaintyManager:
         return Doubt(id=new_id("db"), kind="metadata_gap", about_ids=(g.subject_id,),
                      snapshot_paths=tuple(g.snapshot_paths), question=g.text, created=now, updated=now,
                      detail={"origin": "curiosity", "gap_key": g.key, "gap_kind": g.kind, "topic": g.topic,
-                             "priority": g.priority, "profile": g.profile, "value_boost": g.value})
+                             "priority": g.priority, "profile": g.profile, "value_boost": g.value,
+                             **g.extra})
 
     def open_curiosity_count(self) -> int:
         return sum(1 for st in ("open", "asked", "answered") for d in self.graph.list_doubts(st, 10_000)
