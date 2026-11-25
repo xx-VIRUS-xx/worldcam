@@ -210,3 +210,23 @@ def test_poll_once_survives_poller_error(snaps):
         raise RuntimeError("409 conflict")
     n.poll_replies = boom
     assert eng.poll_once(0, NOON).sent == ["d_0"]
+
+
+def test_multi_mode_default_uncertainty_owner_fallback(snaps):
+    from worldcam.agent.budget import budget_from_users
+    from worldcam.agent.dispatcher import Dispatcher
+    from worldcam.channels.api import FakeChannel
+    from worldcam.users.api import InMemoryUserDirectory
+    users = InMemoryUserDirectory()
+    owner = users.add("Olga", "owner", "fake", "1")
+    ch = FakeChannel()
+    disp = Dispatcher(users, [ch], budget_from_users(users))
+    store = InMemoryGraphStore()
+    (did,) = mk(store, snaps)
+    eng = AmbiguityEngine(store, None, FakeWorkerRunner(scripted(store, snaps)),
+                          EngineConfig(snapshot_dir=str(snaps)), dispatcher=disp)
+    assert eng.tick(NOON).sent == [did]                    # no household: the owner is the fallback
+    ref, rid, msg = ch.sent[0]
+    assert rid == "1" and msg.images and msg.choices[-1].value == "ignore"
+    assert store.get_doubt(did).detail["asked_to"] == owner.id
+    assert eng.tick(local(23, 30)).sent == [] and eng.poll_once(0, NOON).sent == []

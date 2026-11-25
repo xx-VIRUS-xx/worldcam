@@ -1,0 +1,64 @@
+{
+  "name": "medical",
+  "description": "Caregiver / wellness aid for one consenting person: routines (meals, medication, sleep) and unusual inactivity. It observes and reminds; it makes no diagnosis and is not a medical device.",
+  "goals": [
+    "learn the person's daily routines (waking, meals, medication, rest)",
+    "notice when a usual routine is late or missing",
+    "notice a long absence of movement during the day",
+    "confirm health-related facts only with a caregiver or the person themselves"
+  ],
+  "notice_activities": ["eating", "drinking", "taking_medication", "lying_down", "sitting", "walking", "fall_suspected"],
+  "notice_labels": ["person", "bed", "chair", "couch", "cup", "bottle"],
+  "ask_topics": ["medical", "own_facts", "routines"],
+  "alert_rules": [
+    {
+      "id": "possible_fall",
+      "when": {"event_kind": ["activity_changed"], "activity": ["fall_suspected"], "min_confidence": 0.5},
+      "to_permission": "receive_medical_alerts",
+      "priority": 3,
+      "cooldown_min": 15,
+      "text": "A possible fall was detected ({time}, {zone}). This is an automatic guess and may be wrong. Please check on them."
+    },
+    {
+      "id": "routine_overdue",
+      "when": {"routine_state": "overdue"},
+      "to_permission": "receive_medical_alerts",
+      "priority": 2,
+      "cooldown_min": 180,
+      "text": "Usual routine looks late: {routine}. It may just have happened out of view. Please check in if you can."
+    },
+    {
+      "id": "no_movement_daytime",
+      "when": {"no_movement_minutes": 240, "hours": [9, 21]},
+      "to_permission": "receive_medical_alerts",
+      "priority": 2,
+      "cooldown_min": 240,
+      "text": "No movement seen for about {minutes} minutes during the day. The camera may simply not cover where they are. Please check in if you can."
+    }
+  ],
+  "checkins": [
+    {
+      "id": "morning",
+      "every_hours": 24,
+      "jitter": 0.1,
+      "hours": [8, 11],
+      "audience": "self",
+      "quiet": true,
+      "prompt": "Good morning. How are you feeling today? Reply if you need anything."
+    },
+    {
+      "id": "evening",
+      "every_hours": 24,
+      "jitter": 0.1,
+      "hours": [18, 21],
+      "audience": "self",
+      "quiet": true,
+      "prompt": "How was your day? Did you have your usual meals and rest?"
+    }
+  ],
+  "tone": "gentle",
+  "allowed_roles": ["owner", "caregiver"],
+  "retention_days": 60,
+  "send_images_to_cloud": false,
+  "enabled": true
+}
