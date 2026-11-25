@@ -73,7 +73,7 @@ def test_gemini_worker_ask_and_resolve_animal_persona(tmp_path):
     now = 1795500000.0
     store.add_sighting(Sighting(sid, now, "door", 5, zones=("door",), snapshot_path=str(crop),
                                 entity_label="dog"))
-    did = DoubtDetector(store).observe(IdentitySignal(
+    did = DoubtDetector(store, TriggerConfig(entity_min_sightings=1)).observe(IdentitySignal(
         kind="unknown_entity", track_id=5, crop_path=str(crop), ts=now,
         entity_type="animal", entity_label="dog", entity_key="ek_animal_dog_door",
         sighting_id=sid, zones=("door",),
