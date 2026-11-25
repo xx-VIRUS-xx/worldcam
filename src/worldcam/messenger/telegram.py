@@ -162,6 +162,23 @@ class UrllibTransport:
             raise ConnectionError(f"HTTPException: {type(e).__name__}") from None
 
 
+    def get(self, url: str, timeout: float, max_bytes: int) -> tuple[int, bytes]:
+        """GET (file downloads). Reads at most max_bytes + 1 so callers can detect overflow."""
+        import http.client
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "worldcam"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
+                return r.status, r.read(max_bytes + 1)
+        except urllib.error.HTTPError as e:
+            return e.code, b""
+        except urllib.error.URLError as e:
+            raise ConnectionError(f"URLError: {type(e.reason).__name__}") from None
+        except http.client.HTTPException as e:
+            raise ConnectionError(f"HTTPException: {type(e).__name__}") from None
+
+
 def _encode_multipart(fields: dict[str, str],
                       files: Sequence[tuple[str, str, bytes, str]]) -> tuple[bytes, str]:
     boundary = "worldcam-" + uuid.uuid4().hex
@@ -255,6 +272,26 @@ class BotAPI:
             log.warning("telegram %s failed (%s); retry %d in %.1fs", method, err, attempt + 1, delay)
             self._sleep(delay)
             attempt += 1
+
+
+    def download(self, file_path: str, max_bytes: int) -> bytes:
+        """Download a file by Bot API ``file_path`` (from getFile). Needs a transport
+        with ``get``. Raises TelegramError (token redacted) on failure or overflow."""
+        getter = getattr(self._transport, "get", None)
+        if getter is None:
+            raise TelegramError("download", "transport cannot download files")
+        if not re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", file_path) or ".." in file_path:
+            raise TelegramError("download", "unexpected file path")
+        url = f"{self._api_base}/file/bot{self._token.get()}/{file_path}"
+        try:
+            status, data = getter(url, self.request_timeout, max_bytes)
+        except OSError as e:
+            raise TelegramNetworkError("download", f"{type(e).__name__}: {self._redact(str(e))}") from None
+        if status != 200:
+            raise TelegramError("download", f"HTTP {status}", status)
+        if len(data) > max_bytes:
+            raise TelegramError("download", "file too large")
+        return data
 
 
 # ---------------------------------------------------------------- helpers ---
