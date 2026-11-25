@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..capture import LatestFrameGrabber
-from ..sources import make_source
+from ..sources import DEFAULT_SOURCE, make_source
 from ..sources.dual import DualGrabber
 
 log = logging.getLogger("worldcam.run")
@@ -258,7 +258,8 @@ def build_router(path: str = "models.json"):
 # ------------------------------------------------------------------------- main
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", default="0", help="main (full-res) source spec")
+    ap.add_argument("--source", default=DEFAULT_SOURCE,
+                    help=f"main (full-res) source spec (default {DEFAULT_SOURCE}; env WORLDCAM_SOURCE)")
     ap.add_argument("--sub", default=None, help="optional substream spec (e.g. CCTV low-res stream)")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)

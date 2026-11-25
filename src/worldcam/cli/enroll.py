@@ -19,6 +19,8 @@ import sys
 import time
 from typing import Optional
 
+from ..sources import DEFAULT_SOURCE
+
 
 # ---- pure steps (unit-tested without a camera) ----------------------------------------
 def link_owner(store, users, user) -> str:
@@ -109,7 +111,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--user", help="user name or id (default: the only owner)")
     ap.add_argument("--cluster", help="adopt this existing face cluster instead of capturing")
     ap.add_argument("--list", action="store_true", help="list face clusters and exit")
-    ap.add_argument("--source", default="0")
+    ap.add_argument("--source", default=DEFAULT_SOURCE)
     ap.add_argument("--capture", type=float, default=15.0, help="seconds to capture")
     ap.add_argument("--faces", type=int, default=8, help="good faces wanted")
     ap.add_argument("--min-quality", type=float, default=0.25)

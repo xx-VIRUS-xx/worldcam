@@ -26,7 +26,7 @@ import cv2
 from ..capture import LatestFrameGrabber
 from ..metrics import RateMeter
 from ..pipeline import TrackState
-from ..sources import make_source
+from ..sources import DEFAULT_SOURCE, make_source
 from ..sources.dual import DualGrabber
 from ..perception.detector import DEFAULT_CLASSES, YoloDetector
 from ..perception.motion import FrameDiffMotionGate
@@ -48,7 +48,7 @@ def _parse_size(s: str) -> tuple[int, int]:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", default="0", help="camera index / URL / file; the SUB stream if --main is set")
+    ap.add_argument("--source", default=DEFAULT_SOURCE, help="camera index / URL / file; the SUB stream if --main is set")
     ap.add_argument("--main", default=None, help="optional full-res main stream (enables DualGrabber)")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)

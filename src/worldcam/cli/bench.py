@@ -23,7 +23,7 @@ import time
 
 from ..capture import LatestFrameGrabber
 from ..metrics import percentile
-from ..sources import make_source
+from ..sources import DEFAULT_SOURCE, make_source
 from ..sources.webcam import BACKENDS, FOURCCS
 
 
@@ -100,7 +100,7 @@ def phase2(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--source", default="0")
+    ap.add_argument("--source", default=DEFAULT_SOURCE)
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--fps", type=int, default=30)

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
+
 from typing import Optional
 
 from .base import FrameSource
 from .file import FileSource, SyntheticSource
 from .rtsp import StreamSource
 from .webcam import WebcamSource, backend_from_name
+
+
+# The camera every tool uses unless --source says otherwise: this laptop's camera.
+# Override once for a shell/session with:  export WORLDCAM_SOURCE=0
+DEFAULT_SOURCE = os.environ.get("WORLDCAM_SOURCE", "1")
 
 
 def make_source(
@@ -42,5 +49,5 @@ def make_source(
 
 __all__ = [
     "FrameSource", "WebcamSource", "StreamSource", "FileSource",
-    "SyntheticSource", "make_source",
+    "SyntheticSource", "make_source", "DEFAULT_SOURCE",
 ]

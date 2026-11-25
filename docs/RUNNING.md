@@ -50,10 +50,12 @@ Every command takes `--help`.
 
 ### Sources (`--source ...`): same flag for every tool
 
+Every tool defaults to camera `1` (this laptop). Change it for a shell with `export WORLDCAM_SOURCE=0`, or per run with `--source`.
+
 | Spec | Meaning |
 |---|---|
-| `0` | FaceTime HD Camera (built-in) |
-| `1` | iPhone via Continuity Camera. Only present while the phone is near, locked, on its side and still. The index shifts if devices change. |
+| `1` | **The default**: this laptop's camera. Camera indexes depend on which devices are connected (an iPhone via Continuity Camera takes a slot when present), so check with `ffmpeg -f avfoundation -list_devices true -i ""` if it ever opens the wrong one. |
+| `0` | The other local camera slot, if any |
 | `rtsp://user:pass@ip/path` | CCTV or a phone RTSP app (credentials are never logged) |
 | `http://ip:8080/video` | Phone IP-camera app (MJPEG) |
 | `synthetic` | Generated frames, no hardware (capped at 640x360) |
