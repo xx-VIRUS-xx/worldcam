@@ -12,5 +12,5 @@ captures/
 captures/snapshots/
 
 # model weights (downloaded, never committed)
-models/
+/models/
 *.pt
