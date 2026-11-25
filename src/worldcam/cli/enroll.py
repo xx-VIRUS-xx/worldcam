@@ -63,7 +63,8 @@ def pick_user(users, name: Optional[str]):
     elif len(owners) == 1:
         user = owners[0]
     else:
-        raise SystemExit("more than one owner: pass --user")
+        names = ", ".join(f"{u.name!r} ({u.id})" for u in owners)
+        raise SystemExit(f"more than one owner ({names}): pass --user NAME")
     if user.role != "owner":
         raise SystemExit("only an owner can enrol their own face with this tool")
     return user

@@ -207,8 +207,10 @@ class SceneWorker(threading.Thread):
 
 # --------------------------------------------------------------------- channels
 class LogChannel:
-    """--channel log: nothing is sent anywhere; messages are logged. Never receives."""
-    name = "log"
+    """--channel log: nothing is sent anywhere; messages are logged. Never receives.
+    It stands in for Telegram (same channel name), so your real owner account is used
+    and no separate dev user is needed."""
+    name = "telegram"
 
     def __init__(self):
         self._n = 0
@@ -407,8 +409,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             channel = TelegramChannel(token, snapshot_dir=snapshot_dir)
         else:
             channel = LogChannel()
-            if users.by_channel("log", "local") is None:       # dev owner for log mode
-                users.add("Local owner", "owner", "log", "local", profiles=("cctv", "companion", "medical"))
+            if not any(u.role == "owner" for u in users.list()):    # fresh install, no Telegram yet
+                users.add("Local owner", "owner", "telegram", "local", profiles=("cctv", "companion", "medical"))
         owners = [u for u in users.list() if u.role == "owner"]
         if not owners:
             log.error("no owner user: set TELEGRAM_OWNER_CHAT_ID in .env (bootstrap) or run worldcam-users add")
