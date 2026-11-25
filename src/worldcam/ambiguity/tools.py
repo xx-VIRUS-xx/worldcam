@@ -332,3 +332,78 @@ class WorldcamTools:
         self.store.update_doubt(d.id, status="dismissed",
                                 detail=dict(d.detail, dismissed_reason=reason, dismissed_at=self.clock()))
         return {"ok": True, "status": "dismissed"}
+
+    def toolset(self, factory_args: Optional[dict] = None):
+        """ToolSet over this object. Pass `factory_args` (JSON-able, no secrets) when an
+        out-of-process runner must rebuild it through build_toolset()."""
+        from worldcam.models.api import ToolSet, ToolSpec
+        specs = tuple(ToolSpec(n, desc, {"type": "object", "properties": props, "required": list(req)},
+                               _tool_fn(getattr(self, n)), writes=w)
+                      for n, (desc, props, req, w) in TOOL_META.items())
+        return ToolSet(specs, factory=TOOLSET_FACTORY if factory_args is not None else None,
+                       factory_args=factory_args or {})
+
+
+# ---- ToolSet metadata (one entry per tool: description, properties, required, writes) ----
+_S, _N = {"type": "string"}, {"type": "number"}
+_CHOICES = {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}}
+TOOL_META: dict[str, tuple[str, dict, tuple, bool]] = {
+    "get_doubt": ("Read the doubt this run is about: kind, status, question, owner answer, history, about_ids.",
+                  {"doubt_id": _S}, ("doubt_id",), False),
+    "person_context": ("Person, facts, relations, recent sightings and face clusters for one person.",
+                       {"person_id": _S}, ("person_id",), False),
+    "search_people": ("Find people by name or alias (substring, case-insensitive).",
+                      {"text": _S, "limit": {"type": "integer"}}, ("text",), False),
+    "graph_read": ("Parameterised read-only Cypher (READ transaction). Not available on the test file store.",
+                   {"cypher": _S, "params": {"type": "object"}, "limit": {"type": "integer"}}, ("cypher",), False),
+    "upsert_person": ("Create or update an entity (person, animal, object, other) in this doubt's scope. "
+                      "entity_type: person|animal|object|other. kind depends on entity_type (person: "
+                      "household|visitor|unknown; animal: pet|stray|wildlife|visitor|unknown; object: "
+                      "belonging|device|furniture|package|vehicle|unknown). label: short class tag like "
+                      "'dog', 'backpack'.",
+                      {"name": _S, "kind": _S, "aliases": {"type": "array", "items": _S}, "person_id": _S,
+                       "entity_type": _S, "label": _S},
+                      (), True),
+    "label_face_cluster": ("Attach a face cluster from this doubt to a person.",
+                           {"cluster_id": _S, "person_id": _S}, ("cluster_id", "person_id"), True),
+    "add_fact": ("Add a fact. key: snake_case (e.g. relation_to_owner, works_at, visit_pattern). "
+                 "source: owner (the owner said it) | observed (camera) | inferred (your guess). confidence 0..1.",
+                 {"person_id": _S, "key": _S, "value": _S, "source": _S, "confidence": _N},
+                 ("person_id", "key", "value", "source", "confidence"), True),
+    "relate": ("Add a relation edge a -[relation]-> b (e.g. colleague, partner, friend).",
+               {"a_id": _S, "relation": _S, "b_id": _S, "source": _S}, ("a_id", "relation", "b_id", "source"), True),
+    "set_persona_summary": ("Replace the short persona summary of a person in scope.",
+                            {"person_id": _S, "summary": _S}, ("person_id", "summary"), True),
+    "merge_people": ("Merge drop_id into keep_id (both must be part of this doubt).",
+                     {"keep_id": _S, "drop_id": _S}, ("keep_id", "drop_id"), True),
+    "ask_owner": ("Queue one question to the owner (sent by the engine). choices: strings or {label, value}; "
+                  "image_paths default to the doubt's crops and must be under the snapshot dir. Max 3 rounds.",
+                  {"doubt_id": _S, "text": _S, "choices": _CHOICES, "image_paths": {"type": "array", "items": _S}},
+                  ("doubt_id", "text"), True),
+    "resolve_doubt": ("Mark an answered doubt resolved after writing what the answer taught you.",
+                      {"doubt_id": _S, "summary": _S}, ("doubt_id", "summary"), True),
+    "dismiss_doubt": ("Dismiss the doubt (nothing useful to ask or learn).",
+                      {"doubt_id": _S, "reason": _S}, ("doubt_id", "reason"), True),
+}
+assert tuple(TOOL_META) == TOOL_NAMES
+TOOLSET_FACTORY = "worldcam.ambiguity.tools:build_toolset"
+
+
+def _tool_fn(method):
+    def fn(args: dict):
+        if not isinstance(args, dict):
+            raise ToolInputError("arguments must be an object")
+        try:
+            return method(**args)
+        except TypeError as e:           # unknown / missing argument names
+            raise ToolInputError(f"bad arguments: {e}") from None
+    return fn
+
+
+def build_toolset(store: str, snapshot_dir: str, doubt_id: str, max_rounds: int = 3):
+    """Factory ref `worldcam.ambiguity.tools:build_toolset`: the per-doubt ToolSet.
+    `store` is 'neo4j' or 'file:<path>' (see file_store.open_store)."""
+    from worldcam.ambiguity.file_store import open_store
+    tools = WorldcamTools(open_store(store), snapshot_dir, doubt_id, max_rounds=max_rounds)
+    return tools.toolset({"store": store, "snapshot_dir": snapshot_dir, "doubt_id": doubt_id,
+                          "max_rounds": max_rounds})

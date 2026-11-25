@@ -218,7 +218,64 @@ class FakeWorkerRunner:
         return WorkerResult(ok, obj["action"], obj["summary"], None if ok else obj["summary"], data=obj)
 
 
-WORKER_BACKENDS = ("auto", "gemini", "claude")
+# ---- config-driven runners (models layer) ------------------------------------
+MODE_TASK = {"ask": "question", "resolve": "resolve"}     # worker mode -> ModelRouter task
+
+
+class RoutedWorkerRunner:
+    """Worker runner chosen per mode by a ModelRouter. Backend `claude` uses the verified
+    ClaudeWorkerRunner (dedicated MCP sandbox); other backends (gemini) run the generic
+    ToolRunner path over `build_toolset` (same tools, same scope and confinement)."""
+
+    def __init__(self, store_spec: str, snapshot_dir: str, router, *, claude_model: Optional[str] = None,
+                 timeout_s: float = 120.0, max_turns: int = 12, max_rounds: int = 3):
+        from worldcam.models.router import parse_spec
+        self.store_spec, self.snapshot_dir = store_spec, snapshot_dir
+        self.router, self.timeout_s, self.max_turns, self.max_rounds = router, timeout_s, max_turns, max_rounds
+        self._claude: dict[str, ClaudeWorkerRunner] = {}
+        self._runners: dict[str, Any] = {}
+        for mode, task in MODE_TASK.items():
+            backend, model = parse_spec(router.describe()[task])
+            runner = router.runner(task)               # NotConfigured here = fail at startup, not mid-run
+            if backend == "claude":
+                self._claude[mode] = ClaudeWorkerRunner(
+                    store_spec, snapshot_dir, model=claude_model or (model if model != "default" else None),
+                    timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
+            elif backend == "gemini":
+                from worldcam.ambiguity.gemini import GeminiWorkerRunner
+                self._claude[mode] = GeminiWorkerRunner(
+                    store_spec, snapshot_dir, model=model, timeout_s=timeout_s,
+                    max_turns=max_turns, max_rounds=max_rounds)
+            else:
+                self._runners[mode] = (task, runner)
+
+    def run(self, mode: str, doubt: Doubt) -> WorkerResult:
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}")
+        if mode in self._claude:
+            return self._claude[mode].run(mode, doubt)
+        from worldcam.ambiguity.tools import build_toolset
+        from worldcam.models.api import AgentRunRequest
+        t0 = time.monotonic()
+        task, runner = self._runners[mode]
+        try:
+            req = AgentRunRequest(
+                task=task, prompt=(PROMPTS / f"{mode}.md").read_text().format(doubt_id=doubt.id),
+                system=(PROMPTS / "system.md").read_text(),
+                toolset=build_toolset(self.store_spec, self.snapshot_dir, doubt.id, self.max_rounds),
+                output_schema=load_schema(), max_turns=self.max_turns, timeout_s=self.timeout_s)
+            res = runner.run(req)
+            if not res.ok:
+                return WorkerResult(False, error=res.error, wall_s=time.monotonic() - t0)
+            obj = validate_result(res.data)
+        except Exception as e:
+            return WorkerResult(False, error=f"{type(e).__name__}: {e}", wall_s=time.monotonic() - t0)
+        ok = obj["action"] != "error"
+        return WorkerResult(ok, obj["action"], obj["summary"], None if ok else obj["summary"],
+                            wall_s=time.monotonic() - t0, cost_usd=res.usage.get("cost_usd"), data=obj)
+
+
+WORKER_BACKENDS = ("auto", "router", "gemini", "claude")
 
 
 def __getattr__(name: str):
@@ -239,14 +296,24 @@ def make_worker_runner(
     max_turns: int = 12,
     max_rounds: int = 3,
 ) -> WorkerRunner:
-    """Construct the ambiguity worker runner (`gemini`, `claude`, or `auto`).
+    """Construct the ambiguity worker runner.
 
-    `auto` uses Gemini when GEMINI_API_KEY is set (env or .env), otherwise `claude -p`.
+    `router` (new, explicit): per-mode backend from the models config (tasks `question` for ask mode,
+    `resolve` for resolve mode; see docs/models.md); a configured backend without credentials raises
+    NotConfigured, never a silent switch. `gemini` / `claude` force that backend (`claude:sonnet`,
+    `gemini:<model>` also pick the model). `auto` is the LEGACY key-sniffing switch (Gemini when
+    GEMINI_API_KEY is set, else claude); cli/run.py should default to `router` instead.
     """
     from worldcam.ambiguity.gemini import GeminiWorkerRunner, get_gemini_setting
 
+    if ":" in backend:
+        backend, _, model = backend.partition(":")
     if backend not in WORKER_BACKENDS:
         raise ValueError(f"worker backend must be one of {WORKER_BACKENDS}, got {backend!r}")
+    if backend == "router":
+        from worldcam.models.router import ConfiguredModelRouter
+        return RoutedWorkerRunner(store_spec, snapshot_dir, ConfiguredModelRouter(), claude_model=None,
+                                  timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
     use_gemini = backend == "gemini" or (backend == "auto" and bool(get_gemini_setting("GEMINI_API_KEY")))
     if use_gemini:
         return GeminiWorkerRunner(
