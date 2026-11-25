@@ -79,12 +79,24 @@ def confine_image(path: Any, snapshot_dir: str) -> str:
     if not isinstance(path, str) or not path or "\x00" in path:
         raise ToolInputError("image path must be a non-empty string")
     root = os.path.realpath(snapshot_dir)
-    real = os.path.realpath(path if os.path.isabs(path) else os.path.join(root, path))
-    if os.path.commonpath([root, real]) != root:
+    if os.path.isabs(path):
+        candidates = [path]
+    else:
+        # relative paths were stored relative to the capture process's cwd (e.g.
+        # "captures/snapshots/x.jpg"), but a tool server runs elsewhere: try under the
+        # snapshot dir as given, then the bare file name inside it (still confined).
+        candidates = [os.path.join(root, path), os.path.join(root, os.path.basename(path))]
+    escaped = False
+    for cand in candidates:
+        real = os.path.realpath(cand)
+        if os.path.commonpath([root, real]) != root:
+            escaped = True
+            continue
+        if real.lower().endswith(IMAGE_EXT) and os.path.isfile(real):
+            return real
+    if escaped and len(candidates) == 1:
         raise ToolInputError(f"image path outside snapshot dir: {path}")
-    if not real.lower().endswith(IMAGE_EXT) or not os.path.isfile(real):
-        raise ToolInputError(f"not an existing image file under snapshot dir: {path}")
-    return real
+    raise ToolInputError(f"not an existing image file under snapshot dir: {path}")
 
 
 class WorldcamTools:

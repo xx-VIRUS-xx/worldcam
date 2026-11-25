@@ -121,3 +121,32 @@ def test_routed_runner_generic_path_with_fake_tool_runner(env):
     w = RoutedWorkerRunner(path, snaps, R(runner=FakeToolRunner(script)))
     res = w.run("resolve", store.get_doubt(did))
     assert res.ok and res.action == "dismissed", res.error
+
+
+def test_routed_worker_runner_passes_configured_claude_bin(tmp_path):
+    """Regression: the claude worker used a bare `claude` even when options.claude_bin was set."""
+    from worldcam.ambiguity.worker import RoutedWorkerRunner
+    from worldcam.models.api import FakeToolRunner
+    from worldcam.models.router import ConfiguredModelRouter
+
+    cfg = {t: "claude:sonnet" for t in ("agent", "chat", "question", "resolve", "vision_crop",
+                                          "vision_scene", "decide", "summarize")}
+    cfg["options"] = {"claude_bin": "/opt/custom/claude"}
+    r = ConfiguredModelRouter(cfg, env={}, backend_kwargs={"claude": {"spawn": lambda *a, **k: None}})
+    runner = RoutedWorkerRunner("file:" + str(tmp_path / "g.json"), str(tmp_path), r)
+    assert runner._claude["ask"].claude_bin == "/opt/custom/claude"
+
+
+def test_mcp_child_gets_env_file_so_neo4j_credentials_resolve(tmp_path, monkeypatch):
+    """Regression: the claude worker's MCP child starts in an empty cwd and could not find .env."""
+    from worldcam.ambiguity.worker import ClaudeWorkerRunner
+    from worldcam.graph.config import find_env_file
+    envf = tmp_path / "secrets.env"
+    envf.write_text("NEO4J_PASSWORD=x\n")
+    monkeypatch.setenv("WORLDCAM_ENV_FILE", str(envf))
+    cfg = ClaudeWorkerRunner("neo4j", str(tmp_path)).mcp_config("d_1")
+    assert cfg["mcpServers"]["worldcam"]["env"]["WORLDCAM_ENV_FILE"] == str(envf.resolve())
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    assert find_env_file() == envf                      # found although cwd has no .env

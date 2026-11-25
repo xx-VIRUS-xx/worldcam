@@ -14,6 +14,9 @@ from typing import Optional
 
 
 def find_env_file(start: Optional[Path] = None, name: str = ".env") -> Optional[Path]:
+    explicit = os.environ.get("WORLDCAM_ENV_FILE")      # set for MCP child processes (empty cwd)
+    if explicit and start is None and Path(explicit).is_file():
+        return Path(explicit)
     here = (start or Path.cwd()).resolve()
     for d in (here, *here.parents):
         p = d / name
@@ -74,3 +77,10 @@ class Neo4jConfig:
                    user=env.get("NEO4J_USER") or cls.user,
                    password=env.get("NEO4J_PASSWORD", ""),
                    database=env.get("NEO4J_DATABASE") or cls.database)
+
+
+def child_env_file() -> dict[str, str]:
+    """{"WORLDCAM_ENV_FILE": abs path} for subprocesses that start in an empty working
+    directory (the MCP tool server of a `claude -p` worker) so they still find `.env`."""
+    p = find_env_file()
+    return {"WORLDCAM_ENV_FILE": str(p.resolve())} if p else {}

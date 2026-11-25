@@ -65,10 +65,11 @@ class IdentityWorker(threading.Thread):
     face model drops stale snapshots instead of building a backlog."""
 
     def __init__(self, analyzer, resolver, detector, max_pending: int = 64,
-                 on_result: Optional[Callable] = None):
+                 on_result: Optional[Callable] = None, on_doubt: Optional[Callable] = None):
         super().__init__(name="identity", daemon=True)
         self.analyzer, self.resolver, self.detector = analyzer, resolver, detector
         self.on_result = on_result              # called with every ResolveResult (timeline)
+        self.on_doubt = on_doubt                # called with a new doubt id (wakes the question engine)
         self.max_pending = max_pending
         self._pending: dict[int, tuple] = {}
         self._cv = threading.Condition()
@@ -134,8 +135,11 @@ class IdentityWorker(threading.Thread):
                     log.exception("on_result failed")
             sig = signal_from_result(res)
             if sig is not None and self.detector is not None:
-                if self.detector.observe(sig):
+                did = self.detector.observe(sig)
+                if did:
                     self.stats["doubts"] += 1
+                    if self.on_doubt is not None:
+                        self.on_doubt(did)
             log.info("track %s: %s %s (q=%.2f, cluster=%s)", track.track_id, res.decision.value,
                      res.identity.name, res.quality, res.cluster_id)
         if ended:
@@ -270,6 +274,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--scene", action="store_true",
                     help="gated vision scene descriptions -> activity events (uses the vision model)")
     ap.add_argument("--no-motion", action="store_true", help="run the detector on every frame")
+    ap.add_argument("--quiet-hours", default=None, metavar="H-H|off",
+                    help="no questions between these local hours for every user, e.g. 23-8; "
+                         "'off' disables (default: each user's own setting, 23-8 unless changed)")
     ap.add_argument("--worker", choices=("router", "auto", "gemini", "claude"), default="router",
                     help="doubt worker backend (router = models.json, explicit, no silent fallback)")
     ap.add_argument("--worker-model", default=None, help="model for a forced --worker backend")
@@ -300,8 +307,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("GEMINI_API_KEY is not set (environment or .env); --worker gemini needs it. "
                   "Use --worker router (models.json) or claude.", file=sys.stderr)
             return 2
-    snapshot_dir = args.snapshot_dir or os.environ.get("WORLDCAM_SNAPSHOT_DIR", "captures/snapshots")
-    os.makedirs(snapshot_dir, exist_ok=True)
+    snapshot_dir = os.path.abspath(args.snapshot_dir or os.environ.get("WORLDCAM_SNAPSHOT_DIR", "captures/snapshots"))
+    os.makedirs(snapshot_dir, exist_ok=True)       # absolute: stored paths must work from any cwd
     STATE_DIR.mkdir(exist_ok=True)
 
     # heavy imports only here, so --help works without the extras
@@ -350,7 +357,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     recorder = EventRecorder(events, camera=args.camera,
                              on_event=lambda e: agent and agent.submit(
                                  Trigger("event", e.ts, {"event_id": e.id})))
-    identity = IdentityWorker(analyzer, resolver, doubts, on_result=recorder.on_resolve)
+    def nudge_engine(*_):
+        """Wake the question engine (new doubt, new reply, or the periodic tick)."""
+        if agent is not None:
+            agent.submit(Trigger("doubt", time.time(), {}))
+
+    identity = IdentityWorker(analyzer, resolver, doubts, on_result=recorder.on_resolve,
+                              on_doubt=nudge_engine)
     entity_observer = (
         EntityObserver(store, doubts, embedder=EntityEmbedder("auto"), snapshot_dir=snapshot_dir,
                        camera=args.camera, labels=entity_labels, cooldown_s=args.entity_cooldown)
@@ -400,6 +413,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
 
         budget = SqliteAttentionBudget(str(STATE_DIR / "attention.db"))
+        if args.quiet_hours:
+            qh = args.quiet_hours.strip().lower()
+            window = (None, None) if qh in ("off", "none") else tuple(int(x) for x in qh.split("-"))
+            for u in users.list():
+                budget.set_quiet_hours(u.id, *window)
+            log.info("quiet hours set to %s for %d user(s)", qh, len(users.list()))
         dispatcher = Dispatcher(users, [channel], budget)
         uncertainty = UncertaintyManager(store, users, budget=budget, profiles=profile_set, routines=events)
         if args.worker == "router":
@@ -451,6 +470,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 try:
                     if chat.is_doubt_reply(msg):
                         engine.handle_user_reply(user, msg)
+                        nudge_engine()          # run the resolve step now
                     else:
                         out = chat.handle(user, msg)
                         if out is not None:
@@ -476,6 +496,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
+
+    def _ticker():                 # releases quiet-hour queues, expiries, outbox, resolve runs
+        nudge_engine()             # first tick right away: asks doubts left open by earlier runs
+        while not stop.wait(20.0):
+            nudge_engine()
+    if agent is not None:
+        threading.Thread(target=_ticker, name="engine-ticker", daemon=True).start()
     identity.start()
     if scene:
         scene.start()
@@ -497,12 +524,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if t.label == PERSON:
                         identity.submit(t)
                     elif entity_observer is not None:
-                        entity_observer.observe(t)
+                        if entity_observer.observe(t):
+                            nudge_engine()
                 for t in upd.ended:
                     if t.label == PERSON:
                         identity.submit(t, ended=True)
                     elif entity_observer is not None:
-                        entity_observer.observe(t, ended=True)
+                        if entity_observer.observe(t, ended=True):
+                            nudge_engine()
                 if scene is not None and scene_gate.should_fire(upd):
                     scene.submit(upd.active)
                 now = time.monotonic()
@@ -520,6 +549,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except KeyboardInterrupt:
         log.info("interrupted")
     finally:
+        stop.set()
         for t in (identity, scene):
             if t:
                 t.stop()

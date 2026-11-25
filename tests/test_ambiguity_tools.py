@@ -190,3 +190,25 @@ def test_upsert_animal_and_object_entities_and_link_sighting(tmp_path):
     tools.add_fact(pid, "brand_or_model", "Apple MacBook Pro", "observed", 0.8)
     tools.set_persona_summary(pid, "Work MacBook laptop usually on the desk.")
     assert "MacBook" in store.get_person(pid).persona_summary
+
+
+def test_confine_image_resolves_relative_paths_stored_from_another_cwd(tmp_path):
+    """Regression: doubts hold 'captures/snapshots/x.jpg' relative to the capture cwd;
+    the tool server runs elsewhere and must still find the crop (and stay confined)."""
+    import pytest
+
+    from worldcam.ambiguity.tools import ToolInputError, confine_image
+    snaps = tmp_path / "captures" / "snapshots"
+    snaps.mkdir(parents=True)
+    img = snaps / "face_t5.jpg"
+    img.write_bytes(b"\xff\xd8\xff\xd9")
+    assert confine_image("captures/snapshots/face_t5.jpg", str(snaps)) == str(img.resolve())
+    assert confine_image("face_t5.jpg", str(snaps)) == str(img.resolve())
+    with pytest.raises(ToolInputError):
+        confine_image("../../../etc/hosts", str(snaps))
+    with pytest.raises(ToolInputError):
+        confine_image("/etc/hosts", str(snaps))
+    outside = tmp_path / "secret.jpg"
+    outside.write_bytes(b"x")
+    with pytest.raises(ToolInputError):
+        confine_image(str(outside), str(snaps))

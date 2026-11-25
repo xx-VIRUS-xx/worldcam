@@ -29,6 +29,11 @@ from worldcam.graph.api import Doubt
 PROMPTS = Path(__file__).with_name("prompts")
 MODES = ("ask", "resolve")
 ACTIONS = ("asked", "resolved", "followup", "dismissed", "error")
+def _child_env_file() -> dict:
+    from worldcam.graph.config import child_env_file
+    return child_env_file()
+
+
 SECRET_ENV_PREFIXES = ("TELEGRAM_",)          # the worker never needs these
 
 
@@ -122,7 +127,7 @@ class ClaudeWorkerRunner:
             "args": ["-m", "worldcam.ambiguity.mcp_server", "--store", self.store_spec,
                      "--snapshot-dir", self.snapshot_dir, "--doubt", doubt_id,
                      "--max-rounds", str(self.max_rounds)],
-            "env": {"PYTHONPATH": self.src_dir},
+            "env": {"PYTHONPATH": self.src_dir, **_child_env_file()},
         }}}
 
     def prompt(self, mode: str, doubt_id: str) -> str:
@@ -240,6 +245,7 @@ class RoutedWorkerRunner:
             if backend == "claude":
                 self._claude[mode] = ClaudeWorkerRunner(
                     store_spec, snapshot_dir, model=claude_model or (model if model != "default" else None),
+                    claude_bin=(getattr(router, "options", None) or {}).get("claude_bin", "claude"),
                     timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
             elif backend == "gemini":
                 from worldcam.ambiguity.gemini import GeminiWorkerRunner

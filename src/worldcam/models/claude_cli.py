@@ -117,6 +117,11 @@ def _structured(env: dict, schema: Optional[dict]) -> Optional[dict]:
     return obj
 
 
+def _child_env_file() -> dict:
+    from worldcam.graph.config import child_env_file
+    return child_env_file()
+
+
 class _ClaudeBase:
     def __init__(self, model: Optional[str] = None, *, claude_bin: str = "claude",
                  spawn: Spawn = default_spawn):
@@ -188,7 +193,8 @@ class ClaudeCliRunner(_ClaudeBase):
         return {"mcpServers": {MCP_NAME: {
             "type": "stdio", "command": self.python_bin, "args": ["-m", "worldcam.ambiguity.mcp_server"],
             "env": {"PYTHONPATH": self.src_dir, "WORLDCAM_TOOLSET_FACTORY": factory,
-                    "WORLDCAM_TOOLSET_ARGS": json.dumps(factory_args)}}}}
+                    "WORLDCAM_TOOLSET_ARGS": json.dumps(factory_args),
+                    **_child_env_file()}}}}
 
     def build_command(self, req: AgentRunRequest, mcp_config_path: Optional[str]) -> tuple[list, str]:
         stdin_text, stream = stdin_payload(req.prompt, req.images)
