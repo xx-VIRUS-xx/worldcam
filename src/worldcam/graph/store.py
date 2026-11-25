@@ -24,8 +24,8 @@ from dataclasses import fields as dc_fields, replace
 from itertools import islice
 from typing import Any, Optional, Sequence
 
-from .api import (DOUBT_KINDS, DOUBT_STATUSES, FACT_SOURCES, PERSON_KINDS, Doubt, Fact,
-                  FaceMatch, Person, Sighting, new_id)
+from .api import (DOUBT_KINDS, DOUBT_STATUSES, ENTITY_TYPES, FACT_SOURCES, PERSON_KINDS,
+                  Doubt, Fact, FaceMatch, Person, Sighting, new_id, validate_entity_kind)
 from .schema import EMBED_DIM, LABELS, apply_prefix, check_prefix, ensure_schema, index_name
 
 _DOUBT_FIELDS = {f.name for f in dc_fields(Doubt)}
@@ -139,14 +139,17 @@ class Neo4jGraphStore:
         return Person(id=p["id"], name=p.get("name"), kind=p.get("kind") or "unknown",
                       aliases=tuple(p.get("aliases") or ()), first_seen=p.get("first_seen", 0.0),
                       last_seen=p.get("last_seen", 0.0), persona_summary=p.get("persona_summary"),
-                      persona_updated=p.get("persona_updated"))
+                      persona_updated=p.get("persona_updated"),
+                      entity_type=p.get("entity_type") or "person",
+                      label=p.get("label"))
 
     @staticmethod
     def _sighting(s: dict) -> Sighting:
         return Sighting(id=s["id"], ts=s["ts"], camera=s["camera"], track_id=s["track_id"],
                         person_id=s.get("person_id"), cluster_id=s.get("cluster_id"),
                         zones=tuple(s.get("zones") or ()), activity=s.get("activity"),
-                        snapshot_path=s.get("snapshot_path"))
+                        snapshot_path=s.get("snapshot_path"),
+                        entity_label=s.get("entity_label"))
 
     @staticmethod
     def _fact(f: dict) -> Fact:
@@ -176,23 +179,34 @@ class Neo4jGraphStore:
         return row["p"]
 
     # ------------------------------------------------------------------ people
-    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None):
+    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None,
+                      entity_type=None, label=None):
         ts = time.time() if ts is None else float(ts)
-        if kind is not None and kind not in PERSON_KINDS:
-            raise ValueError(f"bad kind {kind!r}")
+        if entity_type is not None and entity_type not in ENTITY_TYPES:
+            raise ValueError(f"bad entity_type {entity_type!r}")
+        if entity_type is not None or person_id is None:
+            validate_entity_kind(entity_type or "person", kind)
         pid = person_id or new_id("p")
 
         def tx_fn(tx):
+            if person_id is not None and entity_type is None and kind is not None:
+                row = self._one(tx, "MATCH (p:Person {id: $id}) RETURN p.entity_type AS et", id=pid)
+                eff_type = (row.get("et") if row else None) or "person"
+                validate_entity_kind(eff_type, kind)
             tx.run(self._q("""
                 MERGE (p:Person {id: $id})
                 ON CREATE SET p.name = $name, p.kind = coalesce($kind, 'unknown'),
+                              p.entity_type = coalesce($entity_type, 'person'), p.label = $label,
                               p.aliases = $aliases, p.first_seen = $ts, p.last_seen = $ts
                 ON MATCH SET p.name = coalesce($name_upd, p.name),
                              p.kind = coalesce($kind, p.kind),
+                             p.entity_type = coalesce($entity_type, p.entity_type, 'person'),
+                             p.label = coalesce($label, p.label),
                              p.aliases = reduce(acc = coalesce(p.aliases, []), a IN $aliases |
                                                 CASE WHEN a IN acc THEN acc ELSE acc + a END),
                              p.last_seen = CASE WHEN p.last_seen > $ts THEN p.last_seen ELSE $ts END
                 """), id=pid, name=name, name_upd=name or None, kind=kind or None,
+                entity_type=entity_type or None, label=label or None,
                 aliases=_dedup(str(a) for a in aliases), ts=ts).consume()
         self._write(tx_fn)
         return pid
@@ -267,12 +281,14 @@ class Neo4jGraphStore:
                 aliases.append(drop["name"])
             tx.run(self._q("""
                 MATCH (k:Person {id: $keep}) SET k.aliases = $aliases,
-                    k.first_seen = $first, k.last_seen = $last
+                    k.first_seen = $first, k.last_seen = $last,
+                    k.label = coalesce(k.label, $drop_label)
                 WITH k MATCH (d:Person {id: $drop}) DETACH DELETE d"""),
                    keep=keep_id, drop=drop_id,
                    aliases=_dedup(a for a in aliases if a != keep.get("name")),
                    first=min(keep.get("first_seen", 0.0), drop.get("first_seen", 0.0)),
-                   last=max(keep.get("last_seen", 0.0), drop.get("last_seen", 0.0))).consume()
+                   last=max(keep.get("last_seen", 0.0), drop.get("last_seen", 0.0)),
+                   drop_label=drop.get("label")).consume()
         self._write(tx_fn)
 
     def forget_person(self, person_id):
@@ -392,7 +408,7 @@ class Neo4jGraphStore:
                 MERGE (s:Sighting {id: $id})
                 SET s.ts = $ts, s.camera = $camera, s.track_id = $track_id, s.person_id = $pid,
                     s.cluster_id = $cid, s.zones = $zones, s.activity = $activity,
-                    s.snapshot_path = $sp
+                    s.snapshot_path = $sp, s.entity_label = $elabel
                 WITH s OPTIONAL MATCH (s)-[r:OF]->() DELETE r
                 WITH DISTINCT s
                 OPTIONAL MATCH (p:Person {id: $pid})
@@ -402,7 +418,7 @@ class Neo4jGraphStore:
                 FOREACH (_ IN CASE WHEN c IS NULL THEN [] ELSE [1] END | MERGE (s)-[:OF]->(c))"""),
                    id=sid, ts=float(s.ts), camera=s.camera, track_id=int(s.track_id), pid=person_id,
                    cid=s.cluster_id, zones=list(s.zones), activity=s.activity,
-                   sp=s.snapshot_path).consume()
+                   sp=s.snapshot_path, elabel=s.entity_label).consume()
         self._write(tx_fn)
         return sid
 

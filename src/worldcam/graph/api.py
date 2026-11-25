@@ -12,10 +12,27 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional, Protocol, Sequence
 
+ENTITY_TYPES = ("person", "animal", "object", "other")
 PERSON_KINDS = ("owner", "household", "visitor", "unknown")
+ANIMAL_KINDS = ("pet", "stray", "wildlife", "visitor", "unknown")
+OBJECT_KINDS = ("belonging", "device", "furniture", "package", "vehicle", "unknown")
+OTHER_KINDS = ("household", "visitor", "belonging", "device", "package", "vehicle", "unknown")
+ENTITY_KINDS = {
+    "person": PERSON_KINDS,
+    "animal": ANIMAL_KINDS,
+    "object": OBJECT_KINDS,
+    "other": OTHER_KINDS,
+}
 FACT_SOURCES = ("owner", "observed", "inferred")
-DOUBT_KINDS = ("unknown_face", "low_confidence", "conflict", "metadata_gap")
+DOUBT_KINDS = ("unknown_face", "low_confidence", "conflict", "metadata_gap", "unknown_entity")
 DOUBT_STATUSES = ("open", "asked", "answered", "resolved", "dismissed")
+
+
+def validate_entity_kind(entity_type: str, kind: Optional[str]) -> None:
+    if entity_type not in ENTITY_TYPES:
+        raise ValueError(f"bad entity_type {entity_type!r}")
+    if kind is not None and kind not in ENTITY_KINDS[entity_type]:
+        raise ValueError(f"bad kind {kind!r} for entity_type {entity_type!r}")
 
 
 def new_id(prefix: str) -> str:
@@ -32,6 +49,8 @@ class Person:
     last_seen: float = 0.0
     persona_summary: Optional[str] = None
     persona_updated: Optional[float] = None
+    entity_type: str = "person"
+    label: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +71,7 @@ class Sighting:
     zones: tuple[str, ...] = ()
     activity: Optional[str] = None
     snapshot_path: Optional[str] = None
+    entity_label: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -83,9 +103,10 @@ class Doubt:
 
 
 class GraphStore(Protocol):
-    # people
+    # people / entities
     def upsert_person(self, person_id: Optional[str] = None, *, name: Optional[str] = None,
-                      kind: Optional[str] = None, aliases: Sequence[str] = (), ts: Optional[float] = None) -> str: ...
+                      kind: Optional[str] = None, aliases: Sequence[str] = (), ts: Optional[float] = None,
+                      entity_type: Optional[str] = None, label: Optional[str] = None) -> str: ...
     def get_person(self, person_id: str) -> Optional[Person]: ...
     def search_people(self, text: str, limit: int = 10) -> list[Person]: ...
     def list_people(self, limit: int = 1000) -> list[Person]: ...
@@ -153,19 +174,23 @@ class InMemoryGraphStore:
         self._rels: list[tuple[str, str, str, str]] = []  # (a, relation, b, source)
         self.doubts: dict[str, Doubt] = {}
 
-    # people
-    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None):
+    # people / entities
+    def upsert_person(self, person_id=None, *, name=None, kind=None, aliases=(), ts=None,
+                      entity_type=None, label=None):
         ts = time.time() if ts is None else ts
-        if kind is not None and kind not in PERSON_KINDS:
-            raise ValueError(f"bad kind {kind!r}")
-        if person_id and person_id in self.people:
-            p = self.people[person_id]
-            p = replace(p, name=name or p.name, kind=kind or p.kind,
-                        aliases=tuple(dict.fromkeys(p.aliases + tuple(aliases))),
-                        last_seen=max(p.last_seen, ts))
+        existing = self.people.get(person_id) if person_id else None
+        eff_type = entity_type or (existing.entity_type if existing else "person")
+        validate_entity_kind(eff_type, kind)
+        if existing is not None:
+            p = replace(existing, name=name or existing.name, kind=kind or existing.kind,
+                        aliases=tuple(dict.fromkeys(existing.aliases + tuple(aliases))),
+                        last_seen=max(existing.last_seen, ts),
+                        entity_type=eff_type,
+                        label=label or existing.label)
         else:
             person_id = person_id or new_id("p")
-            p = Person(person_id, name, kind or "unknown", tuple(aliases), ts, ts)
+            p = Person(person_id, name, kind or "unknown", tuple(aliases), ts, ts,
+                       entity_type=eff_type, label=label)
         self.people[person_id] = p
         return person_id
 
@@ -214,7 +239,8 @@ class InMemoryGraphStore:
         aliases = keep.aliases + drop.aliases + ((drop.name,) if drop.name else ())
         self.people[keep_id] = replace(keep, aliases=tuple(dict.fromkeys(a for a in aliases if a != keep.name)),
                                        first_seen=min(keep.first_seen, drop.first_seen),
-                                       last_seen=max(keep.last_seen, drop.last_seen))
+                                       last_seen=max(keep.last_seen, drop.last_seen),
+                                       label=keep.label or drop.label)
         del self.people[drop_id]
 
     def forget_person(self, person_id):

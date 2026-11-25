@@ -241,6 +241,11 @@ class RoutedWorkerRunner:
                 self._claude[mode] = ClaudeWorkerRunner(
                     store_spec, snapshot_dir, model=claude_model or (model if model != "default" else None),
                     timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
+            elif backend == "gemini":
+                from worldcam.ambiguity.gemini import GeminiWorkerRunner
+                self._claude[mode] = GeminiWorkerRunner(
+                    store_spec, snapshot_dir, model=model, timeout_s=timeout_s,
+                    max_turns=max_turns, max_rounds=max_rounds)
             else:
                 self._runners[mode] = (task, runner)
 
@@ -270,18 +275,52 @@ class RoutedWorkerRunner:
                             wall_s=time.monotonic() - t0, cost_usd=res.usage.get("cost_usd"), data=obj)
 
 
-def make_worker_runner(store_spec: str, snapshot_dir: str, *, router=None, worker: Optional[str] = None,
-                       worker_model: Optional[str] = None, **kw) -> "WorkerRunner":
-    """Build the engine's WorkerRunner from explicit config (no silent backend switching).
+WORKER_BACKENDS = ("auto", "router", "gemini", "claude")
 
-    worker=None / "router": per-mode backend from the ModelRouter (models.json, tasks `question`
-    for ask mode and `resolve` for resolve mode). worker="claude" / "claude:sonnet" / "gemini:<model>":
-    force that backend for both modes (the old `--worker` flag). worker_model is the old
-    `--worker-model` (applies to claude). Raises NotConfigured when credentials are missing."""
-    from worldcam.models.router import ConfiguredModelRouter
-    if worker in (None, "", "router"):
-        router = router or ConfiguredModelRouter()
-    else:
-        spec = worker if ":" in worker else f"{worker}:{worker_model or 'default'}"
-        router = ConfiguredModelRouter(config={"question": spec, "resolve": spec})
-    return RoutedWorkerRunner(store_spec, snapshot_dir, router, claude_model=worker_model, **kw)
+
+def __getattr__(name: str):
+    if name in ("GeminiWorkerRunner", "get_gemini_setting"):
+        from worldcam.ambiguity import gemini
+        return getattr(gemini, name)
+    raise AttributeError(name)
+
+
+def make_worker_runner(
+    backend: str = "auto",
+    store_spec: str = "neo4j",
+    snapshot_dir: str = "captures/snapshots",
+    *,
+    model: Optional[str] = None,
+    claude_bin: str = "claude",
+    timeout_s: float = 120.0,
+    max_turns: int = 12,
+    max_rounds: int = 3,
+) -> WorkerRunner:
+    """Construct the ambiguity worker runner.
+
+    `router` (new, explicit): per-mode backend from the models config (tasks `question` for ask mode,
+    `resolve` for resolve mode; see docs/models.md); a configured backend without credentials raises
+    NotConfigured, never a silent switch. `gemini` / `claude` force that backend (`claude:sonnet`,
+    `gemini:<model>` also pick the model). `auto` is the LEGACY key-sniffing switch (Gemini when
+    GEMINI_API_KEY is set, else claude); cli/run.py should default to `router` instead.
+    """
+    from worldcam.ambiguity.gemini import GeminiWorkerRunner, get_gemini_setting
+
+    if ":" in backend:
+        backend, _, model = backend.partition(":")
+    if backend not in WORKER_BACKENDS:
+        raise ValueError(f"worker backend must be one of {WORKER_BACKENDS}, got {backend!r}")
+    if backend == "router":
+        from worldcam.models.router import ConfiguredModelRouter
+        return RoutedWorkerRunner(store_spec, snapshot_dir, ConfiguredModelRouter(), claude_model=None,
+                                  timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds)
+    use_gemini = backend == "gemini" or (backend == "auto" and bool(get_gemini_setting("GEMINI_API_KEY")))
+    if use_gemini:
+        return GeminiWorkerRunner(
+            store_spec, snapshot_dir, model=model, timeout_s=timeout_s,
+            max_turns=max_turns, max_rounds=max_rounds,
+        )
+    return ClaudeWorkerRunner(
+        store_spec, snapshot_dir, claude_bin=claude_bin, model=model,
+        timeout_s=timeout_s, max_turns=max_turns, max_rounds=max_rounds,
+    )

@@ -22,10 +22,11 @@ from __future__ import annotations
 import os
 import re
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Any, Optional, Sequence
 
-from worldcam.graph.api import FACT_SOURCES, PERSON_KINDS, GraphStore
+from worldcam.graph.api import (ENTITY_KINDS, ENTITY_TYPES, FACT_SOURCES, PERSON_KINDS,
+                                GraphStore)
 
 ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
@@ -33,6 +34,9 @@ REL_RE = re.compile(r"^[a-z][a-z_ ]{0,31}$")
 CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp")
 WORKER_KINDS = tuple(k for k in PERSON_KINDS if k != "owner")   # worker may never create/promote an owner
+WORKER_KINDS_BY_TYPE = {
+    t: (WORKER_KINDS if t == "person" else ks) for t, ks in ENTITY_KINDS.items()
+}
 WRITE_CYPHER = re.compile(r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV|FOREACH|CALL)\b", re.I)
 TOOL_NAMES = ("get_doubt", "person_context", "search_people", "graph_read", "upsert_person",
               "label_face_cluster", "add_fact", "relate", "set_persona_summary", "merge_people",
@@ -132,6 +136,11 @@ class WorldcamTools:
         out = jsonable(d)
         out["sighting_count"] = {cid: len(self.store.recent_sightings(cluster_id=cid, limit=50))
                                  for cid in d.about_ids if cid.startswith("fc")}
+        sids = {i for i in d.about_ids if i.startswith("s_")}
+        if sids:
+            out["sightings"] = [
+                jsonable(s) for s in self.store.recent_sightings(limit=100) if s.id in sids
+            ]
         return out
 
     def person_context(self, person_id: str) -> dict:
@@ -162,23 +171,46 @@ class WorldcamTools:
 
     # ---- write tools ------------------------------------------------------
     def upsert_person(self, name: Optional[str] = None, kind: Optional[str] = None,
-                      aliases: Sequence[str] = (), person_id: Optional[str] = None) -> dict:
+                      aliases: Sequence[str] = (), person_id: Optional[str] = None,
+                      entity_type: Optional[str] = None, label: Optional[str] = None) -> dict:
+        existing_type = "person"
         if person_id is not None:
             person_id = self._person_in_scope(person_id)
-            if self.store.get_person(person_id).kind == "owner" and kind not in (None, "owner"):
+            existing = self.store.get_person(person_id)
+            existing_type = existing.entity_type
+            if existing.kind == "owner" and kind not in (None, "owner"):
                 raise ToolInputError("cannot change the owner's kind")
+        if entity_type is not None:
+            if not isinstance(entity_type, str) or entity_type not in ENTITY_TYPES:
+                raise ToolInputError(f"entity_type must be one of {ENTITY_TYPES}")
+        eff_type = entity_type or existing_type
         if name is not None:
             name = _text(name, "name", 80)
-        if kind is not None and kind not in WORKER_KINDS:
-            raise ToolInputError(f"kind must be one of {WORKER_KINDS}")
+        allowed_kinds = WORKER_KINDS_BY_TYPE[eff_type]
+        if kind is not None:
+            if eff_type == "person" and person_id is not None and self.store.get_person(person_id).kind == "owner":
+                if kind != "owner":
+                    raise ToolInputError("cannot change the owner's kind")
+            elif kind not in allowed_kinds:
+                raise ToolInputError(f"kind must be one of {allowed_kinds} for entity_type={eff_type!r}")
+        if label is not None:
+            label = _text(label, "label", 40)
         if not isinstance(aliases, (list, tuple)) or len(aliases) > 10:
             raise ToolInputError("aliases must be a list of at most 10 strings")
         aliases = tuple(_text(a, "alias", 80) for a in aliases)
         if person_id is None and not name:
-            raise ToolInputError("a new person needs a name")
-        pid = self.store.upsert_person(person_id, name=name, kind=kind, aliases=aliases, ts=self.clock())
+            raise ToolInputError("a new entity needs a name")
+        pid = self.store.upsert_person(person_id, name=name, kind=kind, aliases=aliases,
+                                       ts=self.clock(), entity_type=entity_type, label=label)
         self._touch(pid)
-        return {"person_id": pid}
+        d = self.store.get_doubt(self.scope)
+        if d is not None and d.kind == "unknown_entity":
+            sids = {i for i in d.about_ids if i.startswith("s_")}
+            if sids:
+                for s in self.store.recent_sightings(limit=100):
+                    if s.id in sids and s.person_id is None:
+                        self.store.add_sighting(replace(s, person_id=pid))
+        return {"person_id": pid, "entity_type": eff_type}
 
     def label_face_cluster(self, cluster_id: str, person_id: str) -> dict:
         cid = _id(cluster_id, "cluster_id")
@@ -324,9 +356,13 @@ TOOL_META: dict[str, tuple[str, dict, tuple, bool]] = {
                       {"text": _S, "limit": {"type": "integer"}}, ("text",), False),
     "graph_read": ("Parameterised read-only Cypher (READ transaction). Not available on the test file store.",
                    {"cypher": _S, "params": {"type": "object"}, "limit": {"type": "integer"}}, ("cypher",), False),
-    "upsert_person": ("Create a person (name required) or update one in this doubt's scope. "
-                      "kind: household|visitor|unknown.",
-                      {"name": _S, "kind": _S, "aliases": {"type": "array", "items": _S}, "person_id": _S},
+    "upsert_person": ("Create or update an entity (person, animal, object, other) in this doubt's scope. "
+                      "entity_type: person|animal|object|other. kind depends on entity_type (person: "
+                      "household|visitor|unknown; animal: pet|stray|wildlife|visitor|unknown; object: "
+                      "belonging|device|furniture|package|vehicle|unknown). label: short class tag like "
+                      "'dog', 'backpack'.",
+                      {"name": _S, "kind": _S, "aliases": {"type": "array", "items": _S}, "person_id": _S,
+                       "entity_type": _S, "label": _S},
                       (), True),
     "label_face_cluster": ("Attach a face cluster from this doubt to a person.",
                            {"cluster_id": _S, "person_id": _S}, ("cluster_id", "person_id"), True),

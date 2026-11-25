@@ -5,7 +5,7 @@ import pytest
 
 from worldcam.ambiguity.file_store import FileGraphStore, open_store
 from worldcam.ambiguity.tools import TOOL_NAMES, ToolInputError, WorldcamTools, confine_image
-from worldcam.graph.api import Doubt, InMemoryGraphStore
+from worldcam.graph.api import Doubt, InMemoryGraphStore, Sighting
 
 
 @pytest.fixture
@@ -167,3 +167,26 @@ def test_file_store_roundtrip(tmp_path):
     assert isinstance(b, FileGraphStore)
     with pytest.raises(ValueError):
         open_store("mysql://x")
+
+
+def test_upsert_animal_and_object_entities_and_link_sighting(tmp_path):
+    snaps = tmp_path / "snaps"
+    snaps.mkdir()
+    store = InMemoryGraphStore()
+    store.add_sighting(Sighting("s_obj1", 10.0, "desk", 3, entity_label="laptop"))
+    did = store.create_doubt(Doubt(
+        id="d_obj", kind="unknown_entity", about_ids=("s_obj1",),
+        detail={"entity_type": "object", "entity_label": "laptop"},
+    ))
+    tools = WorldcamTools(store, str(snaps), did, clock=lambda: 50.0)
+    with pytest.raises(ToolInputError):
+        tools.upsert_person(name="Milo", kind="pet", entity_type="person")
+    res = tools.upsert_person(name="Work MacBook", kind="device", entity_type="object", label="laptop")
+    pid = res["person_id"]
+    assert res["entity_type"] == "object"
+    p = store.get_person(pid)
+    assert p.entity_type == "object" and p.label == "laptop" and p.kind == "device"
+    assert store.recent_sightings(person_id=pid)[0].id == "s_obj1"
+    tools.add_fact(pid, "brand_or_model", "Apple MacBook Pro", "observed", 0.8)
+    tools.set_persona_summary(pid, "Work MacBook laptop usually on the desk.")
+    assert "MacBook" in store.get_person(pid).persona_summary

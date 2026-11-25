@@ -58,13 +58,13 @@ Set `JEV_BASE_URL` to point elsewhere. Unverified live (early access, no key).
 Choose per task: keep face crops on a backend you accept, or on `claude` only.
 
 ## Ambiguity worker
-`make_worker_runner(store_spec, snapshot_dir, router=None, worker=None, worker_model=None)` builds the
-engine's `WorkerRunner`. Default: per mode from the router (`ask` -> task `question`, `resolve` -> task
-`resolve`). `claude` uses the verified `ClaudeWorkerRunner`; other backends use the generic ToolRunner path
-over `build_toolset` (same per-doubt scope, image confinement, no delete tool, read-only `graph_read`,
-no owner creation). `worker="claude:sonnet"` / `"gemini:<model>"` forces a backend for both modes (the old
-`--worker`); `worker_model` is the old `--worker-model`. `cli/run.py` should call this instead of
-`ClaudeWorkerRunner(...)` and catch `NotConfigured` at startup.
+`make_worker_runner(backend, store_spec, snapshot_dir, ...)` (signature unchanged) gains `backend="router"`:
+per mode from the router (`ask` -> task `question`, `resolve` -> task `resolve`); `claude` uses the verified
+`ClaudeWorkerRunner`, `gemini` the existing `GeminiWorkerRunner`, any other tool-capable backend the generic
+ToolRunner path over `build_toolset` (same per-doubt scope, image confinement, no delete tool, read-only
+`graph_read`, no owner creation). `claude:sonnet` / `gemini:<model>` force a backend and model. `auto` is the
+legacy key-sniffing switch, kept so existing tests and `--worker auto` work; `cli/run.py` should default to
+`router`, add it to `--worker` choices, and catch `NotConfigured` at startup.
 
 ## Usage log
 `router.usage` (`UsageLog`) keeps the last 500 calls in memory and appends JSONL to `options.usage_log`

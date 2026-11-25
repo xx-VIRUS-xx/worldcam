@@ -113,6 +113,14 @@ def test_upsert_get_and_update_person(store):
     assert store.get_person("p_missing") is None
     with pytest.raises(ValueError):
         store.upsert_person(name="x", kind="alien")
+    dog = store.upsert_person(name="Bruno", kind="pet", entity_type="animal", label="dog", ts=10.0)
+    d = store.get_person(dog)
+    assert (d.entity_type, d.label, d.kind) == ("animal", "dog", "pet")
+    bag = store.upsert_person(name="Red Pack", kind="belonging", entity_type="object", label="backpack", ts=11.0)
+    b = store.get_person(bag)
+    assert (b.entity_type, b.label, b.kind) == ("object", "backpack", "belonging")
+    with pytest.raises(ValueError):
+        store.upsert_person(name="x", entity_type="alien")
 
 
 def test_search_people_by_name_and_alias(store):

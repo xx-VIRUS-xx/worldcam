@@ -1,7 +1,8 @@
-"""The whole pipeline: camera -> detection/tracking -> faces -> graph -> doubts
--> claude -p worker -> Telegram -> owner's answer -> graph.
+"""The whole pipeline: camera -> detection/tracking -> faces/entities -> graph -> doubts
+-> Gemini / claude -p worker -> Telegram -> owner's answer -> graph.
 
   worldcam-run --source 0                        # webcam, Neo4j, Telegram from .env
+  worldcam-run --source 0 --worker gemini        # force Gemini API worker
   worldcam-run --source 1 --sub 0 ...            # (not recommended: different cameras)
   worldcam-run --source 0 --notifier log         # no Telegram: questions are only logged
   worldcam-run --source 0 --no-engine            # perception + identity + graph only
@@ -11,6 +12,7 @@ Threads (all bounded, nothing queues frames):
   main      grabber -> PerceptionLoop (motion gate, YOLO, tracker, best snapshot)
   identity  newest best snapshot per person track -> FaceAnalyzer -> IdentityResolver
             -> GraphStore -> DoubtDetector. Holds at most one pending item per track.
+            Non-person tracks (animals, objects) go to EntityObserver.
   engine    AmbiguityEngine.poll_once(): Telegram replies, then worker runs and sends.
 Ctrl-C stops everything.
 """
@@ -194,7 +196,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--notifier", choices=("telegram", "log"), default="telegram")
     ap.add_argument("--no-engine", action="store_true", help="don't ask questions")
     ap.add_argument("--no-motion", action="store_true", help="run the detector on every frame")
-    ap.add_argument("--worker-model", default=None, help="model for claude -p (default: CLI default)")
+    ap.add_argument("--worker", choices=("auto", "gemini", "claude"), default="auto",
+                    help="ambiguity worker backend (auto prefers Gemini if GEMINI_API_KEY is set)")
+    ap.add_argument("--worker-model", default=None, help="model for worker (e.g. gemini-2.5-flash or sonnet)")
+    ap.add_argument("--entity-labels", default=None,
+                    help="comma-separated non-person YOLO labels to track for entity personas "
+                         "(default: animals + movable objects; 'none' disables)")
+    ap.add_argument("--entity-cooldown", type=float, default=300.0,
+                    help="seconds before re-recording the same non-person entity label/zone")
     ap.add_argument("--match-t", type=float, default=0.45)
     ap.add_argument("--ask-t", type=float, default=0.35)
     ap.add_argument("--snapshot-dir", default=None)
@@ -214,13 +223,38 @@ def main(argv: Optional[list[str]] = None) -> int:
     os.makedirs(snapshot_dir, exist_ok=True)
 
     # heavy imports only here, so --help works without the extras
+    from ..ambiguity.entities import DEFAULT_ENTITY_LABELS, EntityObserver
     from ..ambiguity.file_store import open_store
+    from ..ambiguity.gemini import get_gemini_setting
     from ..ambiguity.triggers import DoubtDetector, TriggerConfig
     from ..identity import FaceAnalyzer, IdentityResolver
     from ..perception import FrameDiffMotionGate, IouTracker, PerceptionLoop
     from ..perception.detector import YoloDetector
 
-    store = open_store(args.store)
+    if not args.no_engine and args.worker == "gemini" and not get_gemini_setting("GEMINI_API_KEY"):
+        print("error: --worker gemini requires GEMINI_API_KEY in the environment or .env",
+              file=sys.stderr)
+        return 2
+
+    if args.entity_labels is None:
+        entity_labels: tuple[str, ...] = DEFAULT_ENTITY_LABELS
+    elif args.entity_labels.strip().lower() in ("none", "off", ""):
+        entity_labels = ()
+    else:
+        entity_labels = tuple(x.strip().lower() for x in args.entity_labels.split(",") if x.strip())
+
+    try:
+        store = open_store(args.store)
+    except Exception as e:
+        if args.store == "neo4j":
+            print(
+                f"error: could not connect to Neo4j ({type(e).__name__}: {e}).\n"
+                "Start Neo4j with: colima start && docker compose up -d\n"
+                "Or run without Neo4j using: --store file:captures/graph.pkl",
+                file=sys.stderr,
+            )
+            return 2
+        raise
     analyzer = FaceAnalyzer(snapshot_dir=snapshot_dir)
     log.info("loading face model ...")
     analyzer.warmup()
@@ -228,17 +262,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     doubts = None if args.no_engine else DoubtDetector(
         store, TriggerConfig(match_t=args.match_t, ask_t=args.ask_t))
     identity = IdentityWorker(analyzer, resolver, doubts)
+    entity_observer = (
+        EntityObserver(store, doubts, snapshot_dir=snapshot_dir, camera=args.camera,
+                       labels=entity_labels, cooldown_s=args.entity_cooldown)
+        if entity_labels else None
+    )
 
     engine_thread = None
     if not args.no_engine:
         from ..ambiguity.engine import AmbiguityEngine, EngineConfig
-        from ..ambiguity.worker import ClaudeWorkerRunner
+        from ..ambiguity.worker import make_worker_runner
         if args.notifier == "telegram":
             from ..messenger.telegram import TelegramNotifier
             notifier = TelegramNotifier.from_env(snapshot_dir=snapshot_dir)
         else:
             notifier = LogNotifier()
-        runner = ClaudeWorkerRunner(args.store, snapshot_dir, model=args.worker_model)
+        runner = make_worker_runner(args.worker, args.store, snapshot_dir, model=args.worker_model)
         engine = AmbiguityEngine(store, notifier, runner, EngineConfig(snapshot_dir=snapshot_dir))
         engine_thread = EngineThread(engine, store, resolver)
 
@@ -248,7 +287,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         grabber = LatestFrameGrabber(main_src)
     detector = YoloDetector()
-    loop = PerceptionLoop(grabber, detector, IouTracker(best_labels=(PERSON,)),
+    best_labels = (PERSON,) + tuple(l for l in entity_labels if l != PERSON)
+    loop = PerceptionLoop(grabber, detector, IouTracker(best_labels=best_labels),
                           gate=None if args.no_motion else FrameDiffMotionGate(),
                           sub_width=args.sub_width)
 
@@ -267,14 +307,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                 for t in upd.active:
                     if t.label == PERSON:
                         identity.submit(t)
+                    elif entity_observer is not None:
+                        entity_observer.observe(t)
                 for t in upd.ended:
                     if t.label == PERSON:
                         identity.submit(t, ended=True)
+                    elif entity_observer is not None:
+                        entity_observer.observe(t, ended=True)
                 now = time.monotonic()
                 if args.stats_every and now >= next_stats:
                     next_stats = now + args.stats_every
-                    log.info("stats: frames=%d skip=%.2f identity=%s decisions=%s engine=%s",
+                    log.info("stats: frames=%d skip=%.2f identity=%s decisions=%s entities=%s engine=%s",
                              loop.frames, loop.skip_ratio, identity.stats, identity.decisions,
+                             entity_observer.stats if entity_observer else "off",
                              engine_thread.reports if engine_thread else "off")
                 if stop.is_set():
                     break

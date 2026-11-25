@@ -6,7 +6,7 @@ import pytest
 from worldcam.ambiguity.file_store import FileGraphStore
 from worldcam.ambiguity.mcp_server import (build_server_from_toolset, build_toolset_from_ref, load_factory)
 from worldcam.ambiguity.tools import TOOL_NAMES, WorldcamTools, build_toolset
-from worldcam.ambiguity.worker import FakeWorkerRunner, make_worker_runner, load_schema
+from worldcam.ambiguity.worker import load_schema
 from worldcam.graph.api import Doubt
 from worldcam.models.api import FakeToolRunner, NotConfigured
 
@@ -87,20 +87,22 @@ def test_custom_toolset_through_generic_server():
     assert "'n'" not in str(res)                           # omitted optional arg is not passed
 
 
-def test_make_worker_runner_is_explicit_config(env, monkeypatch):
+def test_routed_worker_runner_is_explicit_config(env, monkeypatch):
     store, path, snaps, did = env
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    from worldcam.ambiguity.worker import RoutedWorkerRunner
     from worldcam.models.router import ConfiguredModelRouter
-    # gemini for resolve but no key -> clear error at startup, no silent switch to claude
-    r = ConfiguredModelRouter(config={"resolve": "gemini:gemini-2.5-flash"}, env={},
-                              backend_kwargs={"claude": {"spawn": lambda *a: (0, "", "")}})
+    spawn = {"claude": {"spawn": lambda *a: (0, "", "")}}
+    # gemini configured for resolve but no key -> clear error at startup, no silent switch to claude
+    r = ConfiguredModelRouter(config={"resolve": "gemini:gemini-2.5-flash"}, env={}, backend_kwargs=spawn)
     with pytest.raises(NotConfigured, match="GEMINI_API_KEY"):
-        make_worker_runner(path, snaps, router=r)
-    with pytest.raises(NotConfigured, match="GEMINI_API_KEY"):
-        make_worker_runner(path, snaps, worker="gemini:gemini-2.5-flash")
-    ok = ConfiguredModelRouter(config={}, env={}, backend_kwargs={"claude": {"spawn": lambda *a: (0, "", "")}})
-    w = make_worker_runner(path, snaps, router=ok, worker_model="haiku")
+        RoutedWorkerRunner(path, snaps, r)
+    ok = ConfiguredModelRouter(config={}, env={}, backend_kwargs=spawn)
+    w = RoutedWorkerRunner(path, snaps, ok, claude_model="haiku")
     assert w._claude["ask"].model == "haiku" and w._claude["resolve"].model == "haiku"
+    from worldcam.ambiguity.gemini import GeminiWorkerRunner
+    g = ConfiguredModelRouter(config={"question": "gemini:gemini-2.5-flash", "resolve": "gemini:gemini-2.5-flash"},
+                              env={"GEMINI_API_KEY": "k"}, backend_kwargs=spawn)
+    assert isinstance(RoutedWorkerRunner(path, snaps, g)._claude["ask"], GeminiWorkerRunner)
 
 
 def test_routed_runner_generic_path_with_fake_tool_runner(env):

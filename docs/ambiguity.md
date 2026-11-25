@@ -8,9 +8,11 @@ This implements the Doubts, Doubt lifecycle and Worker sandbox sections of `AMBI
 | `ambiguity/engine.py` | `AmbiguityEngine.tick(now)` / `handle_reply(reply)` / `poll_once()`, plus `EngineConfig` |
 | `ambiguity/tools.py` | Logic for the 13 MCP tools: validation, per-doubt scope, image confinement |
 | `ambiguity/mcp_server.py` | stdio MCP server (`mcp` 2.x `MCPServer`; FastMCP was renamed in 2.x) |
-| `ambiguity/worker.py` | `ClaudeWorkerRunner`, `FakeWorkerRunner`, result parsing and validation |
+| `ambiguity/worker.py` | `ClaudeWorkerRunner`, `FakeWorkerRunner`, `make_worker_runner`, result parsing and validation |
+| `ambiguity/gemini.py` | `GeminiWorkerRunner`, `GeminiClient` (REST `generateContent` + multimodal crops + function calling) |
+| `ambiguity/entities.py` | `EntityObserver` for non-person YOLO tracks (`animal`, `object`, etc.) -> sightings + `unknown_entity` doubts |
 | `ambiguity/file_store.py` | `FileGraphStore` (test only: a pickled InMemoryGraphStore guarded by an fcntl lock) and `open_store(spec)` |
-| `ambiguity/smoke.py` | Live smoke driver (real `claude`, file store, FakeNotifier) |
+| `ambiguity/smoke.py` | Live smoke driver (real Gemini or `claude`, person/animal/object, file store, FakeNotifier) |
 | `ambiguity/prompts/` | `system.md`, `ask.md`, `resolve.md`, `worker_result.schema.json` |
 
 ## IdentitySignal (what the resolver must hand over)
@@ -147,6 +149,13 @@ Result:
 - The doubt went to `asked` with `rounds=2`. The follow-up sent was "I couldn't use that reply. Who is the person at the door (name), and how do you know them?"
 
 The model had no tool that could run `ls`, and none that deletes. `merge_people` would have been refused anyway, because the doubt is not a `conflict`.
+
+## Gemini worker + multi-entity personas
+`GeminiWorkerRunner` (`ambiguity/gemini.py`) implements the `WorkerRunner` protocol over the Gemini `generateContent` REST API (stdlib `urllib`, no extra SDK required).
+- **Auth**: `GEMINI_API_KEY` from environment or `.env` (sent via `x-goog-api-key` header, redacted from errors/repr). Default model: `WORLDCAM_GEMINI_MODEL` or `gemini-2.5-flash`.
+- **Backend selection**: `make_worker_runner("auto" | "gemini" | "claude")` and `worldcam-run --worker ...`. `"auto"` uses Gemini when `GEMINI_API_KEY` is set, otherwise `claude -p`.
+- **Multimodal + tools**: Confined snapshot images (`confine_image`) are attached as `inlineData` parts so Gemini can visually inspect people, animals, and objects. Tool calls execute directly on `WorldcamTools` (same 13 tools, same per-doubt scope and read-only guard). If the model finishes without valid JSON, one final structured-output turn (`responseMimeType="application/json"`, `responseJsonSchema`) normalizes the output.
+- **Multi-entity support**: `Person` nodes carry `entity_type` (`person` | `animal` | `object` | `other`) and optional `label` (`dog`, `cat`, `backpack`, `laptop`, ...), and `EntityObserver` turns non-person YOLO tracks into `Sighting` + `unknown_entity` doubts so Gemini collects visual/owner metadata, relations (`pet_of`, `belongs_to`, `used_by`), and persona summaries across people, animals, and objects.
 
 ## Tests
 `tests/test_ambiguity_{triggers,engine,tools,worker}.py` contain 41 tests. They need no network and no claude: they cover the trigger rules, rate limit, quiet hours, expiry, rounds, the reply → resolve path with `FakeWorkerRunner`, MCP tool validation (calling the functions directly and through `MCPServer.call_tool`), the exact tool list, image confinement (including `..` and symlink escapes), command-line construction, secrets kept out of argv, output parsing, and the timeout process-group kill.
