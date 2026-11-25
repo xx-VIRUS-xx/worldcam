@@ -40,6 +40,9 @@ class AgentConfig:
     schedule: dict = field(default_factory=lambda: {
         "curiosity": (3600.0, 0.3), "look_around": (1800.0, 0.3),
         "consolidate": (6 * 3600.0, 0.2), "alert_review": (300.0, 0.1)})
+    # first run of a task after startup (seconds). Without this a task would first fire after a
+    # random 10-100% of its interval: up to an hour for curiosity, so a short session never asks.
+    first_run_s: dict = field(default_factory=lambda: {"curiosity": 45.0, "alert_review": 30.0})
     cameras: tuple = ("default",)
     alert_lookback_s: float = 900.0
     review_event_limit: int = 200
@@ -136,8 +139,10 @@ class AutonomousAgent:
 
     def _schedule_due(self, now: float) -> None:
         for task, (every, jitter) in self.cfg.schedule.items():
-            if task not in self._next:      # first run after a random fraction of the interval
-                self._next[task] = now + every * self.rng.uniform(0.1, 1.0)
+            if task not in self._next:
+                first = self.cfg.first_run_s.get(task)
+                self._next[task] = (now + first * self.rng.uniform(0.8, 1.2) if first is not None
+                                    else now + every * self.rng.uniform(0.1, 1.0))
             if now >= self._next[task]:
                 self._next[task] = now + self._jittered(every, jitter)
                 self.submit(Trigger("random" if jitter else "schedule", now, {"task": task}))

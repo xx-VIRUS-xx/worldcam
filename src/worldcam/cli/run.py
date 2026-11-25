@@ -45,6 +45,21 @@ PERSON = "person"
 STATE_DIR = Path("captures")
 
 
+# ----------------------------------------------------------------------- clocks
+def to_wall(upd, off: float):
+    """Frame/track times are time.monotonic() (seconds since boot). Everything stored in the
+    graph, timeline and doubts must be wall-clock epoch seconds (a monotonic value reads as
+    1970 and makes the engine expire the doubt as 'older than 7 days'). Convert once, here."""
+    from dataclasses import replace
+
+    def tr(t):
+        b = t.best
+        return replace(t, first_ts=t.first_ts + off, last_ts=t.last_ts + off,
+                       stationary_since=(t.stationary_since + off if t.stationary_since else None),
+                       best=(replace(b, ts=b.ts + off) if b is not None else None))
+    return replace(upd, active=[tr(t) for t in upd.active], ended=[tr(t) for t in upd.ended])
+
+
 # --------------------------------------------------------------- identity stage
 def signal_from_result(res):
     """ResolveResult -> IdentitySignal (None when there is nothing to judge)."""
@@ -524,7 +539,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             log.info("running: source=%s graph=%s profiles=%s engine=%s channel=%s scene=%s", args.source,
                      args.store, ",".join(profile_names), "off" if args.no_engine else "on",
                      channel.name if channel else "-", bool(scene))
+            wall_off = time.time() - time.monotonic()
             for upd in loop.run(seconds=args.seconds or None):
+                upd = to_wall(upd, wall_off)
                 recorder.on_track_update(upd)
                 for t in upd.active:
                     if t.label == PERSON:

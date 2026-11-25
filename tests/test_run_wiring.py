@@ -108,3 +108,31 @@ def test_log_channel_sends_and_never_receives():
     from worldcam.cli.run import LogChannel
     ch = LogChannel()
     assert ch.send("local", OutboundMessage("hi")).startswith("log_")
+
+
+def test_to_wall_converts_track_times_so_stored_timestamps_are_epoch_not_boot_time():
+    from worldcam.cli.run import to_wall
+    from worldcam.pipeline import TrackUpdate
+    t = _track(1, seq=3, ts=5000.0)            # monotonic-looking value
+    t = t.__class__(**{**t.__dict__, "first_ts": 4990.0, "last_ts": 5000.0, "stationary_since": 4995.0})
+    upd = to_wall(TrackUpdate([t], [t]), 1_800_000_000.0)
+    a = upd.active[0]
+    assert a.last_ts == 1_800_005_000.0 and a.first_ts == 1_800_004_990.0 and a.stationary_since == 1_800_004_995.0
+    assert a.best.ts == 1_800_005_000.0 and upd.ended[0].best.ts == 1_800_005_000.0
+    assert t.best.ts == 5000.0                  # the original is untouched
+
+
+def test_curiosity_first_runs_within_a_minute_not_up_to_an_hour():
+    import random
+    from worldcam.agent.api import MemoryContext
+    from worldcam.agent.loop import AutonomousAgent
+    from worldcam.agent.profiles import ProfileSet, load_profiles
+    from worldcam.brain.api import InMemoryEventStore
+    from worldcam.users.api import InMemoryUserDirectory
+    store, users, ev = InMemoryGraphStore(), InMemoryUserDirectory(), InMemoryEventStore()
+    ctx = MemoryContext(store, ev, ev, users)
+    from types import SimpleNamespace
+    a = AutonomousAgent(ctx, dispatcher=SimpleNamespace(budget=None), profiles=ProfileSet(load_profiles(["cctv"])), rng=random.Random(1))
+    a._schedule_due(1000.0)
+    assert 1000.0 + 30 <= a._next["curiosity"] <= 1000.0 + 55          # ~45 s, jittered
+    assert a._next["consolidate"] > 1000.0 + 600                       # slow tasks keep the old schedule
