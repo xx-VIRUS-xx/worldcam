@@ -17,6 +17,7 @@ dev = ["pytest>=8"]
 perception = ["ultralytics>=8.3", "scipy>=1.11"]          # YOLO detector + tracker (AGPL-3.0)
 identity = ["insightface>=0.7.3", "onnxruntime>=1.18"]  # face detect + ArcFace embeddings
 graph = ["neo4j>=5.20"]
+reid = ["onnx>=1.16"]                          # only for `python -m worldcam.perception.reid --fetch`
 engine = ["mcp>=2"]                       # MCP server exposed to the claude -p worker
 all = ["worldcam[perception,identity,graph,engine]"]
 

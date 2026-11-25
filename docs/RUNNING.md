@@ -133,6 +133,30 @@ The script starts and stops its own mediamtx and ffmpeg. Each `[event]` line
 should show `thread_alive=True`, `frames_while_down=0`, and `max_read` under
 about 4.1 s.
 
+### v2: the autonomous agent (`worldcam-run`)
+
+`worldcam-run` now starts the whole agent: eyes (people, animals, objects), the brain (graph in
+Neo4j + timeline/routines in `captures/brain.db`), the autonomous loop, doubts, and two-way chat.
+Vision: `docs/VISION.md`. Architecture and file map: `docs/ARCHITECTURE_V2.md`.
+
+```bash
+worldcam-run --source 0 --channel log                       # dev: messages are logged, nothing sent
+worldcam-run --source 0 --profiles cctv,companion           # which application intents are active
+worldcam-run --source 0 --profiles cctv,companion,medical --scene   # + gated vision scene descriptions
+worldcam-run --source 0 --no-engine                         # eyes + brain only (never asks, never chats)
+```
+
+First-time setup for real use:
+1. `worldcam-telegram-setup` (bot token + your chat id into `.env`). You become the owner automatically.
+2. `worldcam-users invite --role caregiver --profiles medical` -> the person sends `/join CODE` to the bot.
+3. Models: `models.json` (copy `models.example.json`) maps each task to `claude:*` / `gemini:*`.
+   Without it, everything runs on the `claude` CLI (it handles images too). No silent fallbacks.
+4. Zones: `zones.example.json`; check with `worldcam-scene-replay --overlay frame.jpg --zones zones.json`.
+
+Tools: `worldcam-brain` (timeline, routines, summaries, retention), `worldcam-users` (whitelist, roles),
+`worldcam-graph` (people, doubts, forget). Fetch the animal/object re-id model once:
+`python -m worldcam.perception.reid --fetch` (needs `pip install onnx`).
+
 ### Full pipeline: `worldcam-run`
 
 One-time setup:

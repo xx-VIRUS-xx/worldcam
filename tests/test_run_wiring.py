@@ -84,7 +84,7 @@ def test_no_face_and_cached_results_give_no_signal():
 
 def test_parser_defaults():
     a = build_parser().parse_args([])
-    assert a.source == "0" and a.store == "neo4j" and a.notifier == "telegram" and a.worker == "auto"
+    assert a.source == "0" and a.store == "neo4j" and a.channel == "telegram" and a.profiles == "cctv" and a.worker == "router"
 
 
 def test_run_requires_gemini_key_when_worker_gemini(monkeypatch, capsys):
@@ -93,3 +93,18 @@ def test_run_requires_gemini_key_when_worker_gemini(monkeypatch, capsys):
     monkeypatch.setattr("worldcam.ambiguity.gemini.load_env", lambda *a, **kw: {})
     assert main(["--worker", "gemini", "--source", "synthetic"]) == 2
     assert "GEMINI_API_KEY" in capsys.readouterr().err
+
+
+def test_build_router_without_models_json_is_claude_only_and_explicit(tmp_path, monkeypatch):
+    from worldcam.cli import run
+    monkeypatch.setattr(run, "find_claude", lambda: "/bin/echo")      # pretend the CLI exists
+    r = run.build_router(str(tmp_path / "missing.json"))
+    d = r.describe()
+    assert d["chat"].startswith("claude:") and d["vision_scene"].startswith("claude:")
+
+
+def test_log_channel_sends_and_never_receives():
+    from worldcam.channels.api import OutboundMessage
+    from worldcam.cli.run import LogChannel
+    ch = LogChannel()
+    assert ch.send("local", OutboundMessage("hi")).startswith("log_")
