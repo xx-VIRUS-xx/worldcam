@@ -404,7 +404,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- agent + chat -----------------------------------------------------------
     channel = gateway = scene = None
-    engine = None
+    engine = dispatcher = None
     if not args.no_engine:
         users = open_directory(STATE_DIR / "users.db")
         ctx.users = users
@@ -501,6 +501,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             gateway = ChannelGateway(channel, users, on_message)
 
+    if channel is not None:
+        if isinstance(channel, LogChannel):
+            log.warning("LOG-ONLY MODE (--channel log): questions and alerts are only written to this log. "
+                        "NOTHING is sent to Telegram. Run without --channel log to receive them.")
+        else:
+            log.info("messages go to Telegram (live)")
+
     # ---- eyes: grabber + perception loop ---------------------------------------
     main_src = make_source(args.source, args.width, args.height, args.fps)
     if args.sub:
@@ -582,7 +589,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             gateway.stop()
         identity.join(timeout=5)
         recorder.flush()
-    log.info("done: frames=%d identity=%s decisions=%s", loop.frames, identity.stats, identity.decisions)
+    delivered = sum(1 for r in (dispatcher.sent_log if dispatcher else []) if r.ok)
+    log.info("done: frames=%d identity=%s decisions=%s messages_sent=%d via %s", loop.frames, identity.stats,
+             identity.decisions, delivered, ("LOG ONLY (not Telegram)" if isinstance(channel, LogChannel)
+                                              else channel.name if channel else "-"))
     return 0
 
 
