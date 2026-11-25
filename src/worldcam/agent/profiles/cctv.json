@@ -1,0 +1,48 @@
+{
+  "name": "cctv",
+  "description": "Smart CCTV: know the household, flag strangers near entrances, keep a timeline of visitors and deliveries.",
+  "goals": [
+    "recognise household members and regular visitors",
+    "flag unknown people near entrances, especially at night",
+    "log deliveries and packages left at the door",
+    "learn which vehicles belong to the household"
+  ],
+  "notice_activities": ["entering", "leaving", "loitering", "carrying_package", "running", "climbing"],
+  "notice_labels": ["person", "car", "truck", "bicycle", "motorcycle", "backpack", "suitcase", "handbag", "dog", "cat"],
+  "ask_topics": ["identity", "relations", "vehicle"],
+  "alert_rules": [
+    {
+      "id": "unknown_person_door_night",
+      "when": {"event_kind": ["entered", "seen", "zone_changed"], "subject": "unknown",
+               "zone": ["door", "entrance", "gate", "porch"], "night": true, "min_confidence": 0.4},
+      "to_permission": "receive_cctv_alerts",
+      "priority": 3,
+      "cooldown_min": 20,
+      "text": "Unknown person near the {zone} at night ({time})."
+    },
+    {
+      "id": "unknown_person_loitering",
+      "when": {"event_kind": ["activity_changed", "stationary"], "subject": "unknown",
+               "activity": ["loitering"], "zone": ["door", "entrance", "gate", "porch", "garden"]},
+      "to_permission": "receive_cctv_alerts",
+      "priority": 2,
+      "cooldown_min": 30,
+      "text": "Someone I do not recognise has been standing near the {zone} ({time})."
+    },
+    {
+      "id": "package_at_door",
+      "when": {"event_kind": ["activity_changed"], "activity": ["carrying_package", "package_left"],
+               "zone": ["door", "porch"]},
+      "to_permission": "receive_cctv_alerts",
+      "priority": 1,
+      "cooldown_min": 60,
+      "text": "A delivery may have arrived at the {zone} ({time})."
+    }
+  ],
+  "checkins": [],
+  "tone": "concise",
+  "allowed_roles": ["owner", "household"],
+  "retention_days": 30,
+  "send_images_to_cloud": false,
+  "enabled": true
+}

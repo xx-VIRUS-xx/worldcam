@@ -1,0 +1,31 @@
+{
+  "name": "companion",
+  "description": "AI companion: knows your people, pets and things, learns your habits and talks about your day without nagging.",
+  "goals": [
+    "learn who the people in the household and their relations are",
+    "learn the names and kinds of pets and regular objects",
+    "learn daily habits and what the user enjoys",
+    "ask a few well-chosen questions rather than many"
+  ],
+  "notice_activities": ["cooking", "eating", "reading", "watching_tv", "exercising", "playing_with_pet", "working"],
+  "notice_labels": ["person", "dog", "cat", "bird", "book", "laptop", "cup", "bicycle"],
+  "ask_topics": ["identity", "relations", "own_facts", "habits"],
+  "alert_rules": [],
+  "checkins": [
+    {
+      "id": "midday",
+      "every_hours": 10,
+      "jitter": 0.4,
+      "hours": [10, 20],
+      "audience": "permission",
+      "to_permission": "receive_companion",
+      "quiet": true,
+      "prompt": "Hi! Anything you would like to tell me or ask about today?"
+    }
+  ],
+  "tone": "warm",
+  "allowed_roles": ["owner", "household"],
+  "retention_days": 30,
+  "send_images_to_cloud": false,
+  "enabled": true
+}
