@@ -38,6 +38,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "worldcam.ambiguity" = ["prompts/*"]
+"worldcam.agent" = ["profiles/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
