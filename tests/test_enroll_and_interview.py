@@ -75,7 +75,7 @@ def test_interview_waits_for_account_link_then_asks_one_question_at_a_time():
     assert [g for g in um.knowledge_gaps(1000.0) if g.kind == "self_profile"] == []   # not linked yet
     users.set_person(owner.id, pid)
     g = next(g for g in um.knowledge_gaps(1000.0) if g.kind == "self_profile")
-    assert g.topic == "own_facts" and g.extra["fact_key"] == OWNER_INTERVIEW[0][0]
+    assert g.topic == "own_facts" and g.extra["fact_key"] == "areas"   # the name is known, so the interview starts with the rooms
     d = um.gap_to_doubt(g, 1000.0)
     assert d.detail["gap_kind"] == "self_profile" and d.detail["fact_key"] == g.extra["fact_key"]
     store.create_doubt(d)

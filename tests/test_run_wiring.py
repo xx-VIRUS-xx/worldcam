@@ -84,7 +84,7 @@ def test_no_face_and_cached_results_give_no_signal():
 
 def test_parser_defaults():
     a = build_parser().parse_args([])
-    assert a.source in ("1", __import__("os").environ.get("WORLDCAM_SOURCE", "1")) and a.store == "neo4j" and a.channel == "telegram" and a.profiles == "cctv" and a.worker == "router"
+    assert a.source in ("1", __import__("os").environ.get("WORLDCAM_SOURCE", "1")) and a.store == "neo4j" and a.channel == "telegram" and a.profiles == "companion,cctv" and a.chattiness == "chatty" and a.worker == "router"
 
 
 def test_run_requires_gemini_key_when_worker_gemini(monkeypatch, capsys):
