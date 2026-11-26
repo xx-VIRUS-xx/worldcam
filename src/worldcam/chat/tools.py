@@ -485,20 +485,27 @@ def build_memory_toolset(ctx: MemoryContext, *, writes: bool = True) -> ToolSet:
     args: dict = {}
     cf = ctx.extras.get("context_factory")
     if isinstance(cf, str) and ctx.user is not None:
-        args = {"context_factory": cf, "user_id": ctx.user.id, "profile": ctx.profile, "writes": writes}
+        args = {"context_factory": cf, "context_args": dict(ctx.extras.get("context_args") or {}),
+                "user_id": ctx.user.id, "profile": ctx.profile, "writes": writes}
     return ToolSet(tuple(specs), factory=FACTORY if args else None, factory_args=args)
 
 
-def build_memory_toolset_from_args(args: dict) -> ToolSet:
+def build_memory_toolset_from_args(args: Optional[dict] = None, **kw) -> ToolSet:
     """Rebuild the toolset in another process. `context_factory` is trusted
-    config ("pkg.module:callable" returning a MemoryContext), never model input."""
+    config ("pkg.module:callable" returning a MemoryContext), never model input.
+    Accepts one dict or keyword arguments (the generic MCP server calls factory(**args))."""
+    args = {**(args or {}), **kw}
     cf = args.get("context_factory", "")
     if not isinstance(cf, str) or not re.fullmatch(r"[A-Za-z_][\w.]*:[A-Za-z_]\w*", cf):
         raise ValueError("bad context_factory")
     mod, _, fn = cf.partition(":")
     if not mod.startswith("worldcam."):
         raise ValueError("context_factory must live in the worldcam package")
-    base: MemoryContext = getattr(importlib.import_module(mod), fn)()
+    cargs = args.get("context_args") or {}
+    if not isinstance(cargs, dict) or not all(isinstance(k, str) and isinstance(v, (str, int, float, bool, type(None)))
+                                              for k, v in cargs.items()):
+        raise ValueError("bad context_args")
+    base: MemoryContext = getattr(importlib.import_module(mod), fn)(**cargs)
     user = base.users.get(str(args.get("user_id", "")))
     if user is None or not user.active:
         raise ValueError("unknown or inactive user")

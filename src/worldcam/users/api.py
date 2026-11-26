@@ -70,6 +70,7 @@ class UserDirectory(Protocol):
     def list(self, include_inactive: bool = False) -> list[User]: ...
     def set_role(self, user_id: str, role: str) -> User: ...
     def set_profiles(self, user_id: str, profiles: Sequence[str]) -> User: ...
+    def rename(self, user_id: str, name: str) -> User: ...
     def set_person(self, user_id: str, person_id: Optional[str]) -> User:
         """Link the user to the graph Person that is them (enables "my mother", self-facts)."""
     def grant(self, user_id: str, permission: str) -> User: ...
@@ -137,6 +138,9 @@ class InMemoryUserDirectory:
 
     def set_person(self, user_id, person_id):
         return self._upd(user_id, person_id=person_id)
+
+    def rename(self, user_id, name):
+        return self._upd(user_id, name=str(name).strip()[:80])
 
     def grant(self, user_id, permission):
         u = self._users[user_id]

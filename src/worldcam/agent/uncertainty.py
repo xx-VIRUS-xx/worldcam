@@ -29,7 +29,10 @@ ROLE_ORDER = {"household": 1, "caregiver": 1, "owner": 2, "guest": 3}
 
 # The agent's curiosity about its owner: asked one at a time, gently spaced.
 # (fact_key, question, profiles that care (None = all), topic, needs health-tracking consent)
+GENERIC_NAMES = frozenset({"", "owner", "local owner", "user", "me", "admin"})   # placeholders, not a real name
+
 OWNER_INTERVIEW = (
+    ("preferred_name", "Hi! I don't know your name yet. What should I call you?", None, "own_facts", False),
     ("areas", "What are the rooms or areas this camera can see (for example desk, bed, door)? "
               "I'll use them to understand where things happen.", None, "own_facts", False),
     ("household", "Who lives here with you? Names and how they're related to you, if you like.",
@@ -309,6 +312,8 @@ class UncertaintyManager:
                 continue
             if key in facts or f"self:{owner.id}:{key}" in taken:
                 continue
+            if key == "preferred_name" and (owner.name or "").strip().lower() not in GENERIC_NAMES:
+                continue                                  # we already know their name
             if needs_consent and not consent:
                 continue
             return Gap(f"self:{owner.id}:{key}", "self_profile", topic, owner.id, question,

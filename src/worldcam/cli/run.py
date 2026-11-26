@@ -281,7 +281,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--sub-width", type=int, default=640, help="detection copy width")
     ap.add_argument("--camera", default="default", help="camera name stored on sightings/events")
-    ap.add_argument("--profiles", default="cctv",
+    ap.add_argument("--chattiness", choices=("quiet", "normal", "chatty"), default="chatty",
+                    help="how eagerly the agent gets to know you: quiet = a question every few hours, "
+                         "normal = hourly, chatty = every few minutes (still capped per hour/day)")
+    ap.add_argument("--profiles", default="companion,cctv",
                     help="comma list of agent profiles: cctv,companion,medical or a path to a profile .json")
     ap.add_argument("--store", default="neo4j", help="graph: 'neo4j' or 'file:<path>' (tests)")
     ap.add_argument("--events-db", default=str(STATE_DIR / "brain.db"), help="SQLite timeline/routines file")
@@ -335,16 +338,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     from ..agent.api import MemoryContext, Trigger
     from ..agent.budget import SqliteAttentionBudget
     from ..agent.dispatcher import Dispatcher
-    from ..agent.loop import AutonomousAgent
+    from ..agent.loop import AgentConfig, AutonomousAgent
     from ..agent.profiles import ProfileSet, load_profiles
-    from ..agent.uncertainty import UncertaintyManager
+    from ..agent.uncertainty import UncertaintyConfig, UncertaintyManager
     from ..ambiguity.engine import AmbiguityEngine, EngineConfig
     from ..ambiguity.entities import DEFAULT_ENTITY_LABELS, EntityObserver
     from ..ambiguity.file_store import open_store
     from ..ambiguity.triggers import DoubtDetector, TriggerConfig
     from ..brain.recorder import EventRecorder
     from ..brain.store import SqliteEventStore
+    from ..channels.api import OutboundMessage
     from ..channels.gateway import ChannelGateway
+    from .enroll import link_owner
     from ..chat.handler import AgentChatHandler
     from ..identity import FaceAnalyzer, IdentityResolver
     from ..models.api import NotConfigured
@@ -431,6 +436,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not owners:
             log.error("no owner user: set TELEGRAM_OWNER_CHAT_ID in .env (bootstrap) or run worldcam-users add")
             return 2
+        for u in owners:                       # every owner is a person in the graph (the interview needs it)
+            link_owner(store, users, u)
+        ctx.extras["context_factory"] = "worldcam.chat.context:build_context"
+        ctx.extras["context_args"] = {"store": args.store, "events_db": os.path.abspath(args.events_db),
+                                      "users_db": os.path.abspath(STATE_DIR / "users.db"),
+                                      "snapshot_dir": snapshot_dir}
 
         budget = SqliteAttentionBudget(str(STATE_DIR / "attention.db"))
         if args.quiet_hours:
@@ -440,7 +451,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 budget.set_quiet_hours(u.id, *window)
             log.info("quiet hours set to %s for %d user(s)", qh, len(users.list()))
         dispatcher = Dispatcher(users, [channel], budget)
-        uncertainty = UncertaintyManager(store, users, budget=budget, profiles=profile_set, routines=events)
+        pace = {"quiet": (6 * 3600.0, 12 * 3600.0, 2), "normal": (3600.0, 4 * 3600.0, 2),
+                "chatty": (300.0, 120.0, 3)}[args.chattiness]          # curiosity every, interview gap, open cap
+        uncertainty = UncertaintyManager(store, users, budget=budget, profiles=profile_set, routines=events,
+                                         config=UncertaintyConfig(self_interview_gap_s=pace[1],
+                                                                  max_open_curiosity=pace[2]))
+        agent_cfg = AgentConfig()
+        agent_cfg.schedule = dict(agent_cfg.schedule, curiosity=(pace[0], 0.3))
+        log.info("chattiness=%s: a curiosity pass about every %d min", args.chattiness, int(pace[0] // 60))
         if args.worker == "router":
             from ..ambiguity.worker import RoutedWorkerRunner
             runner = RoutedWorkerRunner(args.store, snapshot_dir, router)
@@ -459,6 +477,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         resolver.invalidate(cluster_id=i)
                     elif i.startswith("p_"):
                         resolver.invalidate(person_id=i)
+            for did in rep.resolve_runs:           # they told us their name: use it everywhere
+                d = store.get_doubt(did)
+                if d is not None and d.detail.get("fact_key") == "preferred_name":
+                    for pid in d.about_ids:
+                        p = store.get_person(pid)
+                        for u in users.list():
+                            if p is not None and p.name and u.person_id == pid and u.name != p.name:
+                                users.rename(u.id, p.name)
+                                log.info("hello, %s", p.name)
             if rep.sent or rep.resolve_runs or rep.failed:
                 log.info("engine: sent=%s asked=%s resolved=%s failed=%s", rep.sent,
                          rep.asked_runs, rep.resolve_runs, rep.failed)
@@ -476,7 +503,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             scene = SceneWorker(describer, fuser, events, profile_names, args.camera,
                                 on_event=lambda e: agent and agent.submit(
                                     Trigger("event", e.ts, {"event_id": e.id})))
-        agent = AutonomousAgent(ctx, dispatcher, profile_set, uncertainty=uncertainty,
+        agent = AutonomousAgent(ctx, dispatcher, profile_set, uncertainty=uncertainty, config=agent_cfg,
                                 describe_scene=describe_cb, engine_tick=engine_tick)
 
         if not args.no_chat:
@@ -488,9 +515,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             def on_message(user, msg):
                 try:
-                    if chat.is_doubt_reply(msg):
-                        engine.handle_user_reply(user, msg)
+                    is_cmd = (msg.text or "").lstrip().startswith("/") or (msg.choice_value or "").startswith("chat:")
+                    answered = None if is_cmd else engine.handle_user_reply(user, msg)
+                    if answered:
                         nudge_engine()          # run the resolve step now
+                        channel.send(user.channel_ids.get(channel.name, msg.sender_id),
+                                     OutboundMessage("Got it, thank you.", silent=True))
                     else:
                         out = chat.handle(user, msg)
                         if out is not None:

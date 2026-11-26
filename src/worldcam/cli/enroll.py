@@ -27,7 +27,9 @@ def link_owner(store, users, user) -> str:
     """Ensure `user` has a graph Person of kind 'owner'; link and return its id."""
     if user.person_id and store.get_person(user.person_id) is not None:
         return user.person_id
-    pid = store.upsert_person(None, name=user.name, kind="owner")
+    from ..agent.uncertainty import GENERIC_NAMES
+    real = user.name if (user.name or "").strip().lower() not in GENERIC_NAMES else None
+    pid = store.upsert_person(None, name=real, kind="owner")
     users.set_person(user.id, pid)
     return pid
 

@@ -204,6 +204,14 @@ class SqliteUserDirectory:
             self._row(db, user_id)
             return self._set(db, user_id, profiles=json.dumps(profiles))
 
+    def rename(self, user_id, name) -> User:
+        name = str(name).strip()[:80]
+        if not name:
+            raise ValueError("empty name")
+        with self._tx() as db:
+            self._row(db, user_id)
+            return self._set(db, user_id, name=name)
+
     def set_person(self, user_id, person_id) -> User:
         with self._tx() as db:
             self._row(db, user_id)

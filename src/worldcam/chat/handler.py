@@ -83,6 +83,9 @@ def _default_is_doubt_reply(graph) -> Callable[[InboundMessage], bool]:
     return pred
 
 
+ID_SHAPED = re.compile(r"^(ev|p|s|fc|ec|d|db|f)_[A-Za-z0-9]{6,32}$")
+
+
 class AgentChatHandler:
     def __init__(self, ctx: MemoryContext, *, router: Optional[ModelRouter] = None,
                  runner: Optional[ToolRunner] = None, client: Optional[ModelClient] = None,
@@ -198,10 +201,21 @@ class AgentChatHandler:
         answer = res.data["answer"].strip()
         if not answer:
             return self._out("I don't know.", voice)
-        if intent == "question" and seen["calls"] == 0:
+        # tools that ran in another process (claude -p sandbox) can't be observed from here:
+        # trust the runner's own count, accept only id-shaped sources and confined image paths
+        remote = seen["calls"] == 0 and getattr(res, "tool_calls", 0) > 0 and toolset.factory is not None
+        calls = seen["calls"] or (res.tool_calls if remote else 0)
+        if intent == "question" and calls == 0:
             # grounding rule: a question answered without consulting memory is not trusted
             answer = "I haven't checked my memory for that, so I don't know."
             res_sources: list[str] = []
+        elif remote:
+            res_sources = [s for s in res.data.get("sources", []) if isinstance(s, str) and ID_SHAPED.match(s)]
+            snap_root = os.path.realpath(self.snapshot_dir or "captures/snapshots")
+            for p in res.data.get("images", []) or []:
+                rp = os.path.realpath(p) if isinstance(p, str) else ""
+                if rp.startswith(snap_root + os.sep) and os.path.isfile(rp):
+                    seen["images"].add(p)
         else:
             res_sources = [s for s in res.data.get("sources", []) if isinstance(s, str) and s in seen["sources"]]
         self.sessions.add(user.id, "user", text)

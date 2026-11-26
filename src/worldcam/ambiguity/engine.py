@@ -284,9 +284,10 @@ class AmbiguityEngine:
         An answer from someone who may not confirm the topic does NOT settle the doubt
         (see UncertaintyManager.record_answer). Returns the doubt id or None."""
         now = time.time() if now is None else now
-        if not msg.reply_to_ref:
-            return None
-        d = self.store.find_doubt_by_message(str(msg.reply_to_ref))
+        if msg.reply_to_ref:
+            d = self.store.find_doubt_by_message(str(msg.reply_to_ref))
+        else:
+            d = self.pending_question_for(user, msg, now)      # typed without using Telegram's "reply"
         if d is None or d.status not in ("asked", "answered", "open"):
             return None
         asked = d.detail.get("asked_to")
@@ -309,6 +310,19 @@ class AmbiguityEngine:
             return None
         self.uncertainty.record_answer(d, user, text, now, self.cfg.max_answer_chars)
         return d.id
+
+    def pending_question_for(self, user, msg: InboundMessage, now: Optional[float] = None):
+        """The newest question this user was asked and hasn't answered, if `msg` is plain text.
+        People type an answer; they do not use Telegram's reply gesture. Commands (/x) and chat
+        quick-replies are never answers."""
+        now = time.time() if now is None else now
+        txt = (msg.text or "").strip()
+        if not txt or txt.startswith("/") or (msg.choice_value or "").startswith("chat:"):
+            return None
+        limit = self.cfg.unanswered_after_h * 3600.0
+        mine = [d for d in self.store.list_doubts("asked", 10_000)
+                if d.detail.get("asked_to") == user.id and now - d.updated < limit]
+        return max(mine, key=lambda d: d.updated) if mine else None
 
     def poll_once(self, timeout_s: float = 25.0, now: Optional[float] = None) -> TickReport:
         """Convenience loop body: read replies, then tick. A poller error (e.g.
